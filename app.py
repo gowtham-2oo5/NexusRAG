@@ -11,6 +11,8 @@ from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2t
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.retrievers import BM25Retriever
+from langchain.retrievers.ensemble import EnsembleRetriever
 from langchain.prompts import PromptTemplate
 from langchain.schema import Document
 from langchain.docstore.document import Document as LCDocument
@@ -255,26 +257,44 @@ async def run_rag(req: QARequest, authorization: Optional[str] = Header(None)):
         app_logger.info(f"⏱️ Step 2 - Domain Cache Check: {(time.time() - t2):.2f}s")
 
         t3 = time.time()
+        chunks = None  # [ENSEMBLE MOD] Make sure chunks are always available
+
         if faiss_index_exists(faiss_folder):
             vectorstore = load_or_build_faiss_index(None, doc_hash)
-            if not cached_domain:
+
+            if not cached_domain or not os.path.exists(get_domain_cache_path(doc_hash)):
                 docs = load_document(file_path, ext)
                 chunks = split_document(docs)
                 domain = await detect_document_domain(chunks)
                 save_domain_to_cache(doc_hash, domain)
             else:
                 domain = cached_domain
+
+                # [ENSEMBLE MOD] chunks still needed for BM25 even if domain is cached
+                docs = load_document(file_path, ext)
+                chunks = split_document(docs)
         else:
             docs = load_document(file_path, ext)
             chunks = split_document(docs)
             vectorstore = load_or_build_faiss_index(chunks, doc_hash)
             domain = await detect_document_domain(chunks)
             save_domain_to_cache(doc_hash, domain)
+
         app_logger.info(f"⏱️ Step 3 - FAISS + Domain Detection: {(time.time() - t3):.2f}s")
 
         t4 = time.time()
-        retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-        app_logger.info(f"⏱️ Step 4 - Retriever Setup: {(time.time() - t4):.2f}s")
+        # [ENSEMBLE MOD] Create BM25 + FAISS Ensemble Retriever
+        bm25_retriever = BM25Retriever.from_documents(chunks)
+        bm25_retriever.k = 3
+
+        vector_retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+
+        ensemble_retriever = EnsembleRetriever(
+            retrievers=[bm25_retriever, vector_retriever],
+            weights=[0.4, 0.6]
+        )
+        retriever = ensemble_retriever
+        app_logger.info(f"⏱️ Step 4 - Retriever Setup (Ensemble): {(time.time() - t4):.2f}s")
 
         t5 = time.time()
         async def process_question(q):
