@@ -197,16 +197,26 @@ def embed_chunks_in_batches(chunks, embeddings, batch_size=20):
 def load_or_build_faiss_index(chunks, doc_hash):
     embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
     folder = get_faiss_folder(doc_hash)
+
     if faiss_index_exists(folder):
         app_logger.info(f"✅ Loading cached FAISS index for hash: {doc_hash}")
         return FAISS.load_local(folder, embeddings, allow_dangerous_deserialization=True)
-    app_logger.info(f"🔧 Building new FAISS index for hash: {doc_hash}")
-    embedded_vectors, texts, metadatas = embed_chunks_in_batches(chunks, embeddings)
-    vectorstore = FAISS.from_embeddings(list(zip(embedded_vectors, texts)), embeddings, metadatas=metadatas)
-    vectorstore.save_local(folder)
-    app_logger.info(f"💾 Saved FAISS index to {folder}")
-    return vectorstore
-
+    else:
+        app_logger.info(f"🔧 Building new FAISS index for hash: {doc_hash}")
+        embedded_vectors, texts, metadatas = embed_chunks_in_batches(chunks, embeddings)
+        
+        # Fix: Use the correct method signature for FAISS.from_embeddings()
+        # The correct order is: text_embeddings (list of tuples), embedding_function, metadatas (optional)
+        text_embeddings = list(zip(texts, embedded_vectors))
+        vectorstore = FAISS.from_embeddings(
+            text_embeddings=text_embeddings, 
+            embedding=embeddings, 
+            metadatas=metadatas
+        )
+        
+        vectorstore.save_local(folder)
+        app_logger.info(f"💾 Saved FAISS index to {folder}")
+        return vectorstore
 # ========== LLM Helpers ==========
 async def detect_document_domain(docs: List[Document]) -> str:
     sample_content = "\n".join([doc.page_content for doc in docs[:3]])[:2000]
