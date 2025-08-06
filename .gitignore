@@ -183,3 +183,5 @@ faiss_indexes
 faiss_indexes.zip
 logs
 logs-v2
+script.sh
+
