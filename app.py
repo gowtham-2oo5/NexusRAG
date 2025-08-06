@@ -33,9 +33,9 @@ MAX_WORKERS = 8  # Increased for hackathon performance
 EMBEDDING_BATCH_SIZE = 20  # Larger batches - you have good rate limits
 
 # Rate limit optimized settings
-GPT_4O_CONCURRENT = 8      # 500 RPM = ~8 per second max
-GPT_4O_MINI_CONCURRENT = 15 # 500 RPM but use for domain detection only
-EMBEDDING_CONCURRENT = 12   # Good embedding rate limits
+GPT_4O_CONCURRENT = 8  # 500 RPM = ~8 per second max
+GPT_4O_MINI_CONCURRENT = 15  # 500 RPM but use for domain detection only
+EMBEDDING_CONCURRENT = 12  # Good embedding rate limits
 
 # ========== Thread Pool for CPU-bound tasks ==========
 executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
@@ -77,17 +77,18 @@ app_logger.addHandler(console_handler)
 app_logger.info("✅ Logger initialized: Console + File")
 app_logger.info(f"🧪 Logging test: File path is {log_file_path}")
 
+
 # ========== Enhanced Request Logging Middleware ==========
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start_time = time.time()
-    
+
     # Capture ALL request details
     client_ip = request.client.host if request.client else "unknown"
     method = request.method
     url = str(request.url)
     headers = dict(request.headers)
-    
+
     # Create detailed request info structure
     request_details = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -99,33 +100,33 @@ async def log_requests(request: Request, call_next):
         "client_ip": client_ip,
         "user_agent": request.headers.get("user-agent", "Unknown")
     }
-    
+
     app_logger.info(f"🌐 INCOMING REQUEST: {method} {url}")
     app_logger.info(f"🔍 Client IP: {client_ip}")
-    
+
     # Log headers in a readable format
     app_logger.info(f"📋 Headers: {json.dumps(headers, indent=2)}")
-    
+
     # For POST/PUT/PATCH requests, capture and log the complete body
     if method in ["POST", "PUT", "PATCH"]:
         try:
             # Read the body
             body = await request.body()
-            
+
             if body:
                 try:
                     # Try to decode as UTF-8
                     body_str = body.decode('utf-8')
-                    
+
                     if request.headers.get("content-type", "").startswith("application/json"):
                         try:
                             body_json = json.loads(body_str)
                             request_details["body"] = body_json
-                            
+
                             # Log the complete JSON body with formatting
                             app_logger.info(f"📝 Complete Request Body (JSON):")
                             app_logger.info(json.dumps(body_json, indent=2, ensure_ascii=False))
-                            
+
                             # Also log questions count and document URL separately for quick reference
                             if isinstance(body_json, dict):
                                 if "questions" in body_json:
@@ -134,54 +135,54 @@ async def log_requests(request: Request, call_next):
                                         app_logger.info(f"   Q{i}: {q}")
                                 if "documents" in body_json:
                                     app_logger.info(f"📄 Document URL: {body_json.get('documents', 'N/A')}")
-                                    
+
                         except json.JSONDecodeError:
                             request_details["body"] = body_str
                             app_logger.info(f"📝 Complete Request Body (Invalid JSON):\n{body_str}")
                     else:
                         request_details["body"] = body_str
                         app_logger.info(f"📝 Complete Request Body (Raw):\n{body_str}")
-                        
+
                 except UnicodeDecodeError:
                     request_details["body"] = f"<Binary data: {len(body)} bytes>"
                     app_logger.info(f"📝 Complete Request Body (Binary): {len(body)} bytes")
                     # For binary data, show first 500 bytes as hex
                     hex_preview = body[:500].hex()
                     app_logger.info(f"📝 Binary Preview (hex): {hex_preview}")
-                    
+
             else:
                 request_details["body"] = None
                 app_logger.info("📝 Request Body: Empty")
-                
+
         except Exception as e:
             request_details["body_error"] = str(e)
             app_logger.warning(f"⚠️ Could not read request body: {e}")
-    
+
     # Log query parameters if any
     if request.query_params:
         app_logger.info(f"🔗 Query Parameters: {dict(request.query_params)}")
-    
+
     # Log the complete structured request details
     app_logger.info(f"🔍 COMPLETE REQUEST STRUCTURE:")
     app_logger.info(json.dumps(request_details, indent=2, ensure_ascii=False))
-    
+
     # Process request
     try:
         response = await call_next(request)
         process_time = time.time() - start_time
-        
+
         # Log response details
         response_details = {
             "status_code": response.status_code,
             "processing_time": f"{process_time:.2f}s",
             "response_headers": dict(response.headers)
         }
-        
+
         app_logger.info(f"✅ RESPONSE: {response.status_code} | Time: {process_time:.2f}s")
         app_logger.info(f"📤 Response Details: {json.dumps(response_details, indent=2)}")
-        
+
         return response
-        
+
     except Exception as e:
         process_time = time.time() - start_time
         error_details = {
@@ -193,6 +194,7 @@ async def log_requests(request: Request, call_next):
         app_logger.error(f"❌ ERROR DETAILS: {json.dumps(error_details, indent=2)}")
         app_logger.exception("Full error traceback:")
         raise
+
 
 # ========== Env Load ==========
 load_dotenv()
@@ -282,10 +284,12 @@ Answer:
 """
 )
 
+
 # ========== Schema ==========
 class QARequest(BaseModel):
     documents: str
     questions: List[str]
+
 
 # ========== File Helpers ==========
 def get_faiss_folder(doc_hash: str) -> str:
@@ -293,11 +297,14 @@ def get_faiss_folder(doc_hash: str) -> str:
     os.makedirs(folder, exist_ok=True)
     return folder
 
+
 def faiss_index_exists(folder: str) -> bool:
     return os.path.exists(os.path.join(folder, "index.faiss")) and os.path.exists(os.path.join(folder, "index.pkl"))
 
+
 def get_domain_cache_path(doc_hash: str) -> str:
     return os.path.join("faiss_indexes", doc_hash, "domain.txt")
+
 
 async def save_domain_to_cache(doc_hash: str, domain: str):
     """Async version of save_domain_to_cache"""
@@ -305,6 +312,7 @@ async def save_domain_to_cache(doc_hash: str, domain: str):
     async with aiofiles.open(cache_path, 'w') as f:
         await f.write(domain)
     app_logger.info(f"💾 Cached domain '{domain}' for document hash: {doc_hash}")
+
 
 async def load_domain_from_cache(doc_hash: str) -> Optional[str]:
     """Async version of load_domain_from_cache"""
@@ -316,15 +324,18 @@ async def load_domain_from_cache(doc_hash: str) -> Optional[str]:
         app_logger.info(f"✅ Loaded cached domain '{domain}' for document hash: {doc_hash}")
         return domain
     return None
+
+
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DOCS_DIR = os.path.join(ROOT_DIR, "docs")
 os.makedirs(DOCS_DIR, exist_ok=True)
+
 
 async def download_and_hash_document(url: str, ext: str) -> (str, str):
     """Async version using aiohttp for concurrent downloads"""
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"Unsupported file extension: .{ext}")
-    
+
     app_logger.info(f"📥 Downloading document from: {url}")
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
@@ -334,11 +345,11 @@ async def download_and_hash_document(url: str, ext: str) -> (str, str):
     doc_hash = await asyncio.get_event_loop().run_in_executor(
         executor, lambda: hashlib.sha256(content).hexdigest()
     )
-    
+
     file_path = os.path.join(DOCS_DIR, f"{doc_hash}.{ext}")
     async with aiofiles.open(file_path, 'wb') as f:
         await f.write(content)
-    
+
     app_logger.info(f"📄 Saved document to: {file_path} (SHA-256: {doc_hash})")
     return file_path, doc_hash
 
@@ -354,6 +365,7 @@ def load_document_sync(file_path: str, ext: str):
         raise ValueError(f"Unsupported file extension: .{ext}")
     return loader(file_path).load()
 
+
 async def load_document(file_path: str, ext: str):
     """Async wrapper for document loading"""
     app_logger.info(f"📚 Loading document with extension: {ext}")
@@ -361,10 +373,12 @@ async def load_document(file_path: str, ext: str):
         executor, load_document_sync, file_path, ext
     )
 
+
 def split_document_sync(docs):
     """Synchronous document splitting for thread pool execution"""
     splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
     return splitter.split_documents(docs)
+
 
 async def split_document(docs):
     """Async wrapper for document splitting"""
@@ -372,34 +386,35 @@ async def split_document(docs):
         executor, split_document_sync, docs
     )
 
+
 # ========== FAISS ==========
 async def embed_chunks_parallel(chunks, batch_size=EMBEDDING_BATCH_SIZE):
     """Embed chunks in parallel batches optimized for your rate limits"""
     embeddings = OpenAIEmbeddings(model=EMBED_MODEL)
-    
+
     # Split chunks into batches for parallel processing
     chunk_batches = [chunks[i:i + batch_size] for i in range(0, len(chunks), batch_size)]
-    
+
     # Use semaphore to respect embedding rate limits
     embedding_semaphore = asyncio.Semaphore(EMBEDDING_CONCURRENT)
-    
+
     async def embed_batch_with_limit(batch_idx, batch):
         async with embedding_semaphore:
             texts = [chunk.page_content for chunk in batch]
             app_logger.info(f"🔢 Embedding batch {batch_idx + 1} of {len(chunk_batches)}")
             return await embeddings.aembed_documents(texts)
-    
+
     app_logger.info(f"🔥 Embedding {len(chunks)} chunks in {len(chunk_batches)} parallel batches")
     start_time = time.time()
-    
+
     # Process all batches concurrently with rate limiting
     batch_embeddings = await asyncio.gather(
         *(embed_batch_with_limit(i, batch) for i, batch in enumerate(chunk_batches)),
         return_exceptions=True
     )
-    
+
     app_logger.info(f"⚡ Embedding completed in {time.time() - start_time:.2f}s")
-    
+
     # Flatten results and handle exceptions
     all_embeddings = []
     for i, batch_result in enumerate(batch_embeddings):
@@ -410,27 +425,29 @@ async def embed_chunks_parallel(chunks, batch_size=EMBEDDING_BATCH_SIZE):
             texts = [chunk.page_content for chunk in chunk_batches[i]]
             batch_result = embeddings_sync.embed_documents(texts)
         all_embeddings.extend(batch_result)
-    
+
     return all_embeddings
+
 
 def build_faiss_index_sync(chunks, doc_hash, embedded_vectors):
     """Build FAISS index with pre-computed embeddings"""
     embeddings = OpenAIEmbeddings(model=EMBED_MODEL)
     text_embeddings = list(zip([chunk.page_content for chunk in chunks], embedded_vectors))
     vectorstore = FAISS.from_embeddings(
-        text_embeddings=text_embeddings, 
-        embedding=embeddings, 
+        text_embeddings=text_embeddings,
+        embedding=embeddings,
         metadatas=[chunk.metadata for chunk in chunks]
     )
     vectorstore.save_local(get_faiss_folder(doc_hash))
     return vectorstore
+
 
 async def build_faiss_index(chunks, doc_hash):
     """Build FAISS index with parallel embedding generation"""
     app_logger.info(f"🔧 Building new FAISS index for hash: {doc_hash}")
     # Generate embeddings in parallel
     embedded_vectors = await embed_chunks_parallel(chunks)
-    
+
     # Build index in thread pool with pre-computed embeddings
     vectorstore = await asyncio.get_event_loop().run_in_executor(
         executor, build_faiss_index_sync, chunks, doc_hash, embedded_vectors
@@ -438,16 +455,19 @@ async def build_faiss_index(chunks, doc_hash):
     app_logger.info(f"💾 Saved FAISS index to {get_faiss_folder(doc_hash)}")
     return vectorstore
 
+
 def load_faiss_index_sync(doc_hash):
     """Synchronous FAISS index loading for thread pool execution"""
     embeddings = OpenAIEmbeddings(model=EMBED_MODEL)
     return FAISS.load_local(get_faiss_folder(doc_hash), embeddings, allow_dangerous_deserialization=True)
+
 
 async def load_faiss_index(doc_hash):
     """Async wrapper for FAISS index loading"""
     return await asyncio.get_event_loop().run_in_executor(
         executor, load_faiss_index_sync, doc_hash
     )
+
 
 # ========== LLM ==========
 async def detect_document_domain(docs: List[Document]) -> str:
@@ -456,6 +476,7 @@ async def detect_document_domain(docs: List[Document]) -> str:
     prompt = domain_detection_template.format(document_content=sample_content)
     result = await llm.ainvoke(prompt)
     return result.content.strip()
+
 
 def is_general_knowledge_question(question: str) -> bool:
     """Detect if a question is general knowledge/fact-checking type"""
@@ -468,9 +489,10 @@ def is_general_knowledge_question(question: str) -> bool:
     question_lower = question.lower()
     return any(indicator in question_lower for indicator in general_knowledge_indicators)
 
+
 async def ask_with_context(question: str, context_docs: List[Document], domain: str) -> str:
     context = "\n\n".join([doc.page_content for doc in context_docs])
-    
+
     # Choose prompt based on question type
     if is_general_knowledge_question(question):
         app_logger.info(f"🔍 Detected general knowledge question: {question[:50]}...")
@@ -493,19 +515,21 @@ async def ask_with_context(question: str, context_docs: List[Document], domain: 
         app_logger.exception("❌ GPT error")
         raise e
 
+
 # ========== Concurrent Retrieval Helpers ==========
 async def parallel_retrieval(ensemble_retriever, questions, max_concurrent=5):
     """Retrieve documents for all questions in parallel"""
     semaphore = asyncio.Semaphore(max_concurrent)
-    
+
     async def retrieve_for_question(question):
         async with semaphore:
             return await ensemble_retriever.ainvoke(question)
-    
+
     return await asyncio.gather(
         *(retrieve_for_question(q) for q in questions),
         return_exceptions=True
     )
+
 
 def create_bm25_retriever_sync(chunks):
     """Synchronous BM25 retriever creation"""
@@ -513,11 +537,13 @@ def create_bm25_retriever_sync(chunks):
     bm25_retriever.k = 2
     return bm25_retriever
 
+
 async def create_bm25_retriever(chunks):
     """Async wrapper for BM25 retriever creation"""
     return await asyncio.get_event_loop().run_in_executor(
         executor, create_bm25_retriever_sync, chunks
     )
+
 
 async def async_remove_file(file_path: str):
     """Async file removal"""
@@ -525,6 +551,7 @@ async def async_remove_file(file_path: str):
         await asyncio.get_event_loop().run_in_executor(executor, os.remove, file_path)
     except Exception as e:
         app_logger.warning(f"Failed to remove temp file {file_path}: {e}")
+
 
 # ========== Main Endpoint ==========
 @app.post("/hackrx/run")
@@ -534,14 +561,14 @@ async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
 
     rawBody = await req.body()
     try:
-       body_json = rawBody.decode("utf-8")
-       app_logger.info(f" incoming request body: {body_json}")
-       data = json.loads(body_json)
-       
-       req = QARequest(**data)
+        body_json = rawBody.decode("utf-8")
+        app_logger.info(f" incoming request body: {body_json}")
+        data = json.loads(body_json)
+
+        req = QARequest(**data)
     except Exception as e:
-       app_logger.error(f" Error parsing request: {e}")
-       raise HTTPException(status_code = 400, detail="invalid requuest format")
+        app_logger.error(f" Error parsing request: {e}")
+        raise HTTPException(status_code=400, detail="invalid requuest format")
 
     total_start_time = time.time()
     app_logger.info(f"🎯 Starting RAG pipeline for {len(req.questions)} questions")
@@ -551,15 +578,15 @@ async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
 
     try:
         faiss_folder = get_faiss_folder(doc_hash)
-        
+
         # Run multiple operations concurrently
         cached_domain_task = asyncio.create_task(load_domain_from_cache(doc_hash))
         docs_task = asyncio.create_task(load_document(file_path, ext))
-        
+
         # Wait for document loading and domain cache check
         cached_domain, docs = await asyncio.gather(cached_domain_task, docs_task)
         app_logger.info(f"📄 Document loaded: {len(docs)} pages")
-        
+
         # Split documents asynchronously
         chunks = await split_document(docs)
         app_logger.info(f"✂️ Document split into {len(chunks)} chunks")
@@ -569,7 +596,7 @@ async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
             # Load existing index and create retrievers concurrently
             vectorstore_task = asyncio.create_task(load_faiss_index(doc_hash))
             bm25_task = asyncio.create_task(create_bm25_retriever(chunks))
-            
+
             if cached_domain:
                 domain = cached_domain
                 app_logger.info(f"✅ Loaded cached domain '{domain}' for document hash: {doc_hash}")
@@ -589,7 +616,7 @@ async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
             vectorstore_task = asyncio.create_task(build_faiss_index(chunks, doc_hash))
             domain_task = asyncio.create_task(detect_document_domain(chunks))
             bm25_task = asyncio.create_task(create_bm25_retriever(chunks))
-            
+
             vectorstore, domain, bm25_retriever = await asyncio.gather(
                 vectorstore_task, domain_task, bm25_task
             )
@@ -600,7 +627,7 @@ async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
         # Create ensemble retriever
         vector_retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
         ensemble_retriever = EnsembleRetriever(
-            retrievers=[bm25_retriever, vector_retriever], 
+            retrievers=[bm25_retriever, vector_retriever],
             weights=[0.4, 0.6]
         )
         app_logger.info("🔍 Created Ensemble Retriever (BM25 + FAISS)")
@@ -608,33 +635,33 @@ async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
         # ULTRA-FAST PARALLEL PROCESSING: Retrieve docs for ALL questions at once
         app_logger.info(f"🚀 Processing {len(req.questions)} questions in parallel")
         start_time = time.time()
-        
+
         retrievals = await parallel_retrieval(ensemble_retriever, req.questions, max_concurrent=10)
         app_logger.info(f"📄 Document retrieval completed in {time.time() - start_time:.2f}s")
-        
+
         # Process Q&A for all questions concurrently - optimized for your 500 RPM limit
         # 500 RPM = ~8 requests per second max, so 8 concurrent is perfect
         qa_semaphore = asyncio.Semaphore(GPT_4O_CONCURRENT)
-        
+
         async def process_question_with_docs(question, docs):
             if isinstance(docs, Exception):
                 app_logger.error(f"Retrieval failed for question: {docs}")
                 return f"Error retrieving context: {str(docs)}"
-            
+
             async with qa_semaphore:
                 return await ask_with_context(question, docs, domain)
 
         qa_start_time = time.time()
         # Process all Q&A concurrently
         answers = await asyncio.gather(
-            *(process_question_with_docs(q, docs) 
+            *(process_question_with_docs(q, docs)
               for q, docs in zip(req.questions, retrievals)),
             return_exceptions=True
         )
-        
+
         app_logger.info(f"🤖 LLM processing completed in {time.time() - qa_start_time:.2f}s")
         app_logger.info(f"🏆 Total processing time: {time.time() - start_time:.2f}s")
-        
+
         # Handle any exceptions in answers
         processed_answers = []
         for i, answer in enumerate(answers):
@@ -646,14 +673,14 @@ async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
 
         total_time = time.time() - total_start_time
         app_logger.info(f"✅ Total time: {total_time:.2f}s for {len(req.questions)} questions in domain '{domain}'")
-        
+
         # Log all questions and answers like in original code
         for i, (q, a) in enumerate(zip(req.questions, processed_answers), start=1):
             app_logger.info(f"📌 Q{i}: {q.strip()}")
             app_logger.info(f"📝 A{i}: {a.strip()}")
 
         return {
-            "answers": processed_answers, 
+            "answers": processed_answers,
             "detected_domain": domain,
             "performance": {
                 "total_time": f"{total_time:.2f}s",
@@ -662,30 +689,40 @@ async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
             }
         }
 
+    except Exception as e:
+        app_logger.error(e)
+
     finally:
         # Clean up temp file asynchronously
         if os.path.exists(file_path):
-            asyncio.create_task(async_remove_file(file_path))
+            print("File hit bro ok")
+            # asyncio.create_task(async_remove_file(file_path))
+            pass
+
 
 # ========== Startup/Shutdown Events ==========
 @app.on_event("startup")
 async def startup_event():
     app_logger.info("🚀 API starting up with concurrency optimizations")
 
+
 @app.on_event("shutdown")
 async def shutdown_event():
     app_logger.info("🔥 Shutting down thread pool executor")
     executor.shutdown(wait=True)
+
 
 # ========== Health Check ==========
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "version": "2.5", "concurrency": "enabled"}
 
+
 # ========== Root Endpoint ==========
 @app.get("/")
 async def root():
     return {"message": "HackRX Document Q&A API", "version": "2.5", "docs": "/docs"}
+
 
 if __name__ == "__main__":
     import uvicorn
