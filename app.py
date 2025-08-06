@@ -316,6 +316,9 @@ async def load_domain_from_cache(doc_hash: str) -> Optional[str]:
         app_logger.info(f"✅ Loaded cached domain '{domain}' for document hash: {doc_hash}")
         return domain
     return None
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+DOCS_DIR = os.path.join(ROOT_DIR, "docs")
+os.makedirs(DOCS_DIR, exist_ok=True)
 
 async def download_and_hash_document(url: str, ext: str) -> (str, str):
     """Async version using aiohttp for concurrent downloads"""
@@ -326,19 +329,19 @@ async def download_and_hash_document(url: str, ext: str) -> (str, str):
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             content = await response.read()
-    
+
     # Hash calculation in thread pool to avoid blocking
     doc_hash = await asyncio.get_event_loop().run_in_executor(
-        executor, hashlib.sha256, content
+        executor, lambda: hashlib.sha256(content).hexdigest()
     )
-    doc_hash = doc_hash.hexdigest()
     
-    temp_path = os.path.join(tempfile.gettempdir(), f"{doc_hash}.{ext}")
-    async with aiofiles.open(temp_path, 'wb') as f:
+    file_path = os.path.join(DOCS_DIR, f"{doc_hash}.{ext}")
+    async with aiofiles.open(file_path, 'wb') as f:
         await f.write(content)
     
-    app_logger.info(f"📄 Saved document to: {temp_path} (SHA-256: {doc_hash})")
-    return temp_path, doc_hash
+    app_logger.info(f"📄 Saved document to: {file_path} (SHA-256: {doc_hash})")
+    return file_path, doc_hash
+
 
 def load_document_sync(file_path: str, ext: str):
     """Synchronous document loading for thread pool execution"""
