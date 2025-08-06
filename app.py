@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Header, Request, Response
+from filelock import FileLock
 from pydantic import BaseModel
 from typing import List, Optional
 import os, tempfile, requests, time, logging, hashlib, asyncio, json
@@ -326,33 +327,69 @@ async def load_domain_from_cache(doc_hash: str) -> Optional[str]:
     return None
 
 
+
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-DOCS_DIR = os.path.join(ROOT_DIR, "docs")
+DOCS_DIR = "/tmp/docs"
+ALLOWED_EXTENSIONS = {"pdf", "docx", "txt", "md"}
 os.makedirs(DOCS_DIR, exist_ok=True)
 
+HASH_INDEX_PATH = os.path.join(DOCS_DIR, "doc_hashes.json")
 
+def load_hash_index():
+    if os.path.exists(HASH_INDEX_PATH):
+        with open(HASH_INDEX_PATH, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_hash_index(index):
+    with open(HASH_INDEX_PATH, "w") as f:
+        json.dump(index, f)
+
+
+executor = None
 async def download_and_hash_document(url: str, ext: str) -> (str, str):
-    """Async version using aiohttp for concurrent downloads"""
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"Unsupported file extension: .{ext}")
+    app_logger.info(f"Attempting to download doc: {url}")
 
-    app_logger.info(f"📥 Downloading document from: {url}")
+    urlHash = hashlib.sha256(url.encode()).hexdigest()[:16]
+    potentialFile = os.path.join(DOCS_DIR, f"{urlHash}.{ext}")
+
+    hash_index = load_hash_index()
+
+    # ✅ Check for direct match
+    if os.path.exists(potentialFile):
+        async with aiofiles.open(potentialFile, 'rb') as f:
+            content = await f.read()
+        docHash = hashlib.sha256(content).hexdigest()
+        app_logger.info(f"Doc already cached: {potentialFile}")
+        return potentialFile, docHash
+
+    # ✅ Download and hash the document once
+    app_logger.info(f"Downloading doc: {url}")
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             content = await response.read()
+    docHash = hashlib.sha256(content).hexdigest()
 
-    # Hash calculation in thread pool to avoid blocking
-    doc_hash = await asyncio.get_event_loop().run_in_executor(
-        executor, lambda: hashlib.sha256(content).hexdigest()
-    )
+    # ✅ Check for existing match in hash index
+    for fname, existing_hash in hash_index.items():
+        if existing_hash == docHash:
+            cached_path = os.path.join(DOCS_DIR, fname)
+            if os.path.exists(cached_path):
+                app_logger.info(f"Doc already cached (hash match): {fname}")
+                return cached_path, docHash
 
-    file_path = os.path.join(DOCS_DIR, f"{doc_hash}.{ext}")
-    async with aiofiles.open(file_path, 'wb') as f:
+    # ✅ Save file and update hash index
+    filePath = os.path.join(DOCS_DIR, f"{urlHash}.{ext}")
+    async with aiofiles.open(filePath, 'wb') as f:
         await f.write(content)
 
-    app_logger.info(f"📄 Saved document to: {file_path} (SHA-256: {doc_hash})")
-    return file_path, doc_hash
+    hash_index[f"{urlHash}.{ext}"] = docHash
+    save_hash_index(hash_index)
 
+    app_logger.info(f"Saved doc: {filePath}, hash: {docHash}")
+    return filePath, docHash
 
 def load_document_sync(file_path: str, ext: str):
     """Synchronous document loading for thread pool execution"""
@@ -523,7 +560,15 @@ async def parallel_retrieval(ensemble_retriever, questions, max_concurrent=5):
 
     async def retrieve_for_question(question):
         async with semaphore:
-            return await ensemble_retriever.ainvoke(question)
+            try:
+                # EnsembleRetriever might not support ainvoke, use invoke in thread pool
+                return await asyncio.get_event_loop().run_in_executor(
+                    executor, ensemble_retriever.invoke, question
+                )
+            except Exception as e:
+                app_logger.error(f"❌ Retrieval failed for question '{question}': {str(e)}")
+                app_logger.exception("Full retrieval error traceback:")
+                return e
 
     return await asyncio.gather(
         *(retrieve_for_question(q) for q in questions),
@@ -641,7 +686,7 @@ async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
 
         # Process Q&A for all questions concurrently - optimized for your 500 RPM limit
         # 500 RPM = ~8 requests per second max, so 8 concurrent is perfect
-        qa_semaphore = asyncio.Semaphore(GPT_4O_CONCURRENT)
+        qa_semaphore = asyncio.Semaphore(GPT_4O_MINI_CONCURRENT)
 
         async def process_question_with_docs(question, docs):
             if isinstance(docs, Exception):
@@ -695,8 +740,8 @@ async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
     finally:
         # Clean up temp file asynchronously
         if os.path.exists(file_path):
-            print("File hit bro ok")
-            # asyncio.create_task(async_remove_file(file_path))
+            #print("File hit bro ok")
+            #asyncio.create_task(async_remove_file(file_path))
             pass
 
 
