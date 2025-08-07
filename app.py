@@ -329,12 +329,25 @@ def get_domain_cache_path(doc_hash: str) -> str:
     return os.path.join("faiss_indexes", doc_hash, "domain.txt")
 
 
+def get_extracted_text_cache_path(doc_hash: str) -> str:
+    """Get path for cached extracted text content"""
+    return os.path.join("faiss_indexes", doc_hash, "extracted_text.txt")
+
+
 async def save_domain_to_cache(doc_hash: str, domain: str):
     """Async version of save_domain_to_cache"""
     cache_path = get_domain_cache_path(doc_hash)
     async with aiofiles.open(cache_path, 'w') as f:
         await f.write(domain)
     app_logger.info(f"💾 Cached domain '{domain}' for document hash: {doc_hash}")
+
+
+async def save_extracted_text_to_cache(doc_hash: str, extracted_text: str):
+    """Cache extracted text content to avoid re-processing"""
+    cache_path = get_extracted_text_cache_path(doc_hash)
+    async with aiofiles.open(cache_path, 'w', encoding='utf-8') as f:
+        await f.write(extracted_text)
+    app_logger.info(f"💾 Cached extracted text ({len(extracted_text)} chars) for document hash: {doc_hash}")
 
 
 async def load_domain_from_cache(doc_hash: str) -> Optional[str]:
@@ -346,6 +359,17 @@ async def load_domain_from_cache(doc_hash: str) -> Optional[str]:
             domain = content.strip()
         app_logger.info(f"✅ Loaded cached domain '{domain}' for document hash: {doc_hash}")
         return domain
+    return None
+
+
+async def load_extracted_text_from_cache(doc_hash: str) -> Optional[str]:
+    """Load cached extracted text content"""
+    path = get_extracted_text_cache_path(doc_hash)
+    if os.path.exists(path):
+        async with aiofiles.open(path, 'r', encoding='utf-8') as f:
+            content = await f.read()
+        app_logger.info(f"✅ Loaded cached extracted text ({len(content)} chars) for document hash: {doc_hash}")
+        return content
     return None
 
 
@@ -1253,20 +1277,41 @@ async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
     try:
         faiss_folder = get_faiss_folder(doc_hash)
 
-        # Run multiple operations concurrently
-        cached_domain_task = asyncio.create_task(load_domain_from_cache(doc_hash))
-        docs_task = asyncio.create_task(load_document(file_path, ext))
-
-        # Wait for document loading and domain cache check
-        cached_domain, docs = await asyncio.gather(cached_domain_task, docs_task)
-        app_logger.info(f"📄 Document loaded: {len(docs)} pages")
-
-        # Split documents asynchronously
-        chunks = await split_document(docs)
-        app_logger.info(f"✂️ Document split into {len(chunks)} chunks")
-
+        # Check if we have cached FAISS index and can skip processing
         if faiss_index_exists(faiss_folder):
-            app_logger.info(f"✅ Loading cached FAISS index for hash: {doc_hash}")
+            app_logger.info(f"✅ FAISS index exists for hash: {doc_hash}")
+            
+            # Run multiple operations concurrently for cached case
+            cached_domain_task = asyncio.create_task(load_domain_from_cache(doc_hash))
+            cached_text_task = asyncio.create_task(load_extracted_text_from_cache(doc_hash))
+            
+            # Wait for cache checks
+            cached_domain, cached_extracted_text = await asyncio.gather(cached_domain_task, cached_text_task)
+            
+            if cached_extracted_text:
+                app_logger.info(f"✅ Using cached extracted text, skipping file processing")
+                # Create document from cached text
+                docs = [Document(
+                    page_content=cached_extracted_text,
+                    metadata={
+                        "source": file_path,
+                        "file_type": ext,
+                        "extraction_method": "cached"
+                    }
+                )]
+            else:
+                app_logger.info(f"⚠️ No cached text found, processing file: {file_path}")
+                # Process the document normally
+                docs = await load_document(file_path, ext)
+                # Cache the extracted text for future use
+                asyncio.create_task(save_extracted_text_to_cache(doc_hash, docs[0].page_content))
+            
+            app_logger.info(f"📄 Document content ready: {len(docs)} pages")
+            
+            # Split documents asynchronously
+            chunks = await split_document(docs)
+            app_logger.info(f"✂️ Document split into {len(chunks)} chunks")
+            
             # Load existing index and create retrievers concurrently
             vectorstore_task = asyncio.create_task(load_faiss_index(doc_hash))
             bm25_task = asyncio.create_task(create_bm25_retriever(chunks))
@@ -1286,6 +1331,18 @@ async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
                 asyncio.create_task(save_domain_to_cache(doc_hash, domain))
         else:
             app_logger.info(f"🔧 Building new FAISS index for hash: {doc_hash}")
+            # Process document for first time
+            docs_task = asyncio.create_task(load_document(file_path, ext))
+            docs = await docs_task
+            app_logger.info(f"📄 Document loaded: {len(docs)} pages")
+            
+            # Cache the extracted text for future use
+            asyncio.create_task(save_extracted_text_to_cache(doc_hash, docs[0].page_content))
+            
+            # Split documents asynchronously
+            chunks = await split_document(docs)
+            app_logger.info(f"✂️ Document split into {len(chunks)} chunks")
+            
             # Build new index and detect domain concurrently
             vectorstore_task = asyncio.create_task(build_faiss_index(chunks, doc_hash))
             domain_task = asyncio.create_task(detect_document_domain(chunks))
