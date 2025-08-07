@@ -1,8 +1,7 @@
 from fastapi import FastAPI, HTTPException, Header, Request, Response
-#from filelock import FileLock
 from pydantic import BaseModel
 from typing import List, Optional
-import os, tempfile, requests, time, logging, hashlib, asyncio, json
+import os, tempfile, requests, time, logging, hashlib, asyncio, json, base64
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from logging.handlers import RotatingFileHandler
@@ -20,8 +19,13 @@ from langchain.prompts import PromptTemplate
 from langchain.schema import Document
 from openai import RateLimitError
 
+# NEW IMPORTS for PPT processing
+import subprocess
+import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
+
 # Initialize FastAPI app FIRST
-app = FastAPI(title="HackRX Document Q&A API", version="2.5")
+app = FastAPI(title="HackRX Document Q&A API", version="2.8")
 
 # ========== Constants ==========
 GPT_PRIMARY = "gpt-4o-mini"
@@ -29,7 +33,7 @@ GPT_FALLBACK = "gpt-4o-mini"
 EMBED_MODEL = "text-embedding-3-large"
 CHUNK_SIZE = 512
 CHUNK_OVERLAP = 50
-ALLOWED_EXTENSIONS = {"pdf", "txt", "docx"}
+ALLOWED_EXTENSIONS = {"pdf", "txt", "docx", "ppt", "pptx", "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"}  # Added ppt, pptx, images
 MAX_WORKERS = 8  # Increased for hackathon performance
 EMBEDDING_BATCH_SIZE = 20  # Larger batches - you have good rate limits
 
@@ -200,10 +204,18 @@ async def log_requests(request: Request, call_next):
 # ========== Env Load ==========
 load_dotenv()
 openai_api_key = os.getenv("OPENAI_API_KEY")
+gemini_api_key = os.getenv("GEMINI_API_KEY")  # NEW: Gemini API key
 if not openai_api_key:
     raise ValueError("OPENAI_API_KEY not found in .env")
+if not gemini_api_key:
+    raise ValueError("GEMINI_API_KEY not found in .env")
 os.environ["OPENAI_API_KEY"] = openai_api_key
+
+# Configure Gemini
+genai.configure(api_key=gemini_api_key)
+
 app_logger.info("✅ OpenAI API key loaded")
+app_logger.info("✅ Gemini API key loaded")
 
 # ========== Prompts ==========
 domain_detection_template = PromptTemplate(
@@ -327,10 +339,198 @@ async def load_domain_from_cache(doc_hash: str) -> Optional[str]:
     return None
 
 
+# ========== NEW: PPT/PPTX Processing Functions ==========
+def convert_ppt_to_pdf_sync(ppt_path: str) -> str:
+    """Convert PPT/PPTX to PDF using LibreOffice"""
+    pdf_dir = os.path.dirname(ppt_path)
+    try:
+        # Use LibreOffice to convert PPT to PDF
+        result = subprocess.run([
+            r"C:\Program Files\LibreOffice\program\soffice.exe", '--headless', '--convert-to', 'pdf',
+            '--outdir', pdf_dir, ppt_path
+        ], check=True, capture_output=True, text=True, timeout=60)
+        
+        # Generate PDF path
+        base_name = os.path.splitext(os.path.basename(ppt_path))[0]
+        pdf_path = os.path.join(pdf_dir, f"{base_name}.pdf")
+        
+        if os.path.exists(pdf_path):
+            app_logger.info(f"✅ Converted PPT to PDF: {pdf_path}")
+            return pdf_path
+        else:
+            raise Exception(f"PDF conversion failed - output file not found. LibreOffice output: {result.stdout}, Error: {result.stderr}")
+            
+    except subprocess.TimeoutExpired:
+        app_logger.error("LibreOffice conversion timed out after 60 seconds")
+        raise Exception("PPT to PDF conversion timed out")
+    except subprocess.CalledProcessError as e:
+        app_logger.error(f"LibreOffice conversion failed: {e}, stdout: {e.stdout}, stderr: {e.stderr}")
+        raise Exception(f"PPT to PDF conversion failed: {e}")
+    except Exception as e:
+        app_logger.error(f"Unexpected error during PPT conversion: {e}")
+        raise Exception(f"PPT to PDF conversion failed: {e}")
+
+
+async def convert_ppt_to_pdf(ppt_path: str) -> str:
+    """Async wrapper for PPT to PDF conversion"""
+    return await asyncio.get_event_loop().run_in_executor(
+        executor, convert_ppt_to_pdf_sync, ppt_path
+    )
+
+
+def extract_text_from_pdf_with_gemini_sync(pdf_path: str) -> str:
+    """Synchronous text extraction from PDF using Gemini API"""
+    try:
+        # Upload the file to Gemini
+        app_logger.info(f"Uploading {pdf_path} to Gemini...")
+        
+        pdf_file = genai.upload_file(
+            path=pdf_path, 
+            display_name=os.path.basename(pdf_path)
+        )
+        app_logger.info(f"✅ Uploaded file to Gemini: {pdf_file.name}")
+
+        # Wait for the file to be processed
+        import time
+        while pdf_file.state.name == "PROCESSING":
+            app_logger.info("⏳ Waiting for Gemini to process file...")
+            time.sleep(2)
+            pdf_file = genai.get_file(pdf_file.name)
+
+        if pdf_file.state.name == "FAILED":
+            raise Exception(f"Gemini file processing failed: {pdf_file.state}")
+
+        # Initialize the generative model with safety settings
+        model = genai.GenerativeModel(
+            "gemini-1.5-flash",
+            safety_settings={
+                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+            }
+        )
+
+        # Generate content
+        prompt = """Extract all the text content from this PDF document. 
+        Return only the text content without any additional formatting, explanations, or metadata.
+        Include all text from slides, bullet points, headings, and any other textual content.
+        Preserve the logical structure and flow of the content."""
+        
+        response = model.generate_content([prompt, pdf_file])
+
+        # Clean up the uploaded file
+        try:
+            genai.delete_file(pdf_file.name)
+            app_logger.info(f"🗑️ Cleaned up Gemini file: {pdf_file.name}")
+        except Exception as cleanup_e:
+            app_logger.warning(f"Failed to cleanup Gemini file: {cleanup_e}")
+
+        if not response.text:
+            raise Exception("Gemini returned empty response")
+
+        extracted_text = response.text.strip()
+        app_logger.info(f"✅ Extracted {len(extracted_text)} characters from PDF using Gemini")
+        return extracted_text
+
+    except Exception as e:
+        app_logger.error(f"Gemini text extraction failed: {e}")
+        # Attempt to clean up the file even if generation fails
+        try:
+            if 'pdf_file' in locals() and pdf_file:
+                genai.delete_file(pdf_file.name)
+                app_logger.info(f"🗑️ Cleaned up Gemini file {pdf_file.name} after error.")
+        except Exception as cleanup_e:
+            app_logger.error(f"Failed to clean up Gemini file after error: {cleanup_e}")
+        raise Exception(f"Failed to extract text from PDF: {e}")
+
+
+async def extract_text_from_pdf_with_gemini(pdf_path: str) -> str:
+    """Async wrapper for Gemini text extraction"""
+    return await asyncio.get_event_loop().run_in_executor(
+        executor, extract_text_from_pdf_with_gemini_sync, pdf_path
+    )
+
+
+def extract_text_from_image_with_gemini_sync(image_path: str) -> str:
+    """Synchronous text extraction from image using Gemini API"""
+    try:
+        # Upload the image file to Gemini
+        app_logger.info(f"Uploading image {image_path} to Gemini...")
+        
+        image_file = genai.upload_file(
+            path=image_path, 
+            display_name=os.path.basename(image_path)
+        )
+        app_logger.info(f"✅ Uploaded image to Gemini: {image_file.name}")
+
+        # Wait for the file to be processed
+        import time
+        while image_file.state.name == "PROCESSING":
+            app_logger.info("⏳ Waiting for Gemini to process image...")
+            time.sleep(2)
+            image_file = genai.get_file(image_file.name)
+
+        if image_file.state.name == "FAILED":
+            raise Exception(f"Gemini image processing failed: {image_file.state}")
+
+        # Initialize the generative model with safety settings
+        model = genai.GenerativeModel(
+            "gemini-1.5-flash",
+            safety_settings={
+                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+            }
+        )
+
+        # Generate content from image
+        prompt = """Extract all the text content from this image. 
+        This could be a document, screenshot, diagram, or any image containing text.
+        Return only the text content without any additional formatting, explanations, or metadata.
+        Include all visible text, labels, headings, captions, and any other textual content.
+        If there are tables, preserve their structure. If there are diagrams with labels, include those labels.
+        If the image contains handwritten text, do your best to transcribe it accurately."""
+        
+        response = model.generate_content([prompt, image_file])
+
+        # Clean up the uploaded file
+        try:
+            genai.delete_file(image_file.name)
+            app_logger.info(f"🗑️ Cleaned up Gemini image file: {image_file.name}")
+        except Exception as cleanup_e:
+            app_logger.warning(f"Failed to cleanup Gemini image file: {cleanup_e}")
+
+        if not response.text:
+            raise Exception("Gemini returned empty response for image")
+
+        extracted_text = response.text.strip()
+        app_logger.info(f"✅ Extracted {len(extracted_text)} characters from image using Gemini")
+        return extracted_text
+
+    except Exception as e:
+        app_logger.error(f"Gemini image text extraction failed: {e}")
+        # Attempt to clean up the file even if generation fails
+        try:
+            if 'image_file' in locals() and image_file:
+                genai.delete_file(image_file.name)
+                app_logger.info(f"🗑️ Cleaned up Gemini image file {image_file.name} after error.")
+        except Exception as cleanup_e:
+            app_logger.error(f"Failed to clean up Gemini image file after error: {cleanup_e}")
+        raise Exception(f"Failed to extract text from image: {e}")
+
+
+async def extract_text_from_image_with_gemini(image_path: str) -> str:
+    """Async wrapper for Gemini image text extraction"""
+    return await asyncio.get_event_loop().run_in_executor(
+        executor, extract_text_from_image_with_gemini_sync, image_path
+    )
+
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-DOCS_DIR = "/tmp/docs"
-ALLOWED_EXTENSIONS = {"pdf", "docx", "txt", "md"}
+DOCS_DIR = os.path.join(tempfile.gettempdir(), "hackrx_docs")
+ALLOWED_EXTENSIONS = {"pdf", "docx", "txt", "md", "ppt", "pptx", "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"}  # Updated with images
 os.makedirs(DOCS_DIR, exist_ok=True)
 
 HASH_INDEX_PATH = os.path.join(DOCS_DIR, "doc_hashes.json")
@@ -346,8 +546,7 @@ def save_hash_index(index):
         json.dump(index, f)
 
 
-executor = None
-async def download_and_hash_document(url: str, ext: str) -> (str, str):
+async def download_and_hash_document(url: str, ext: str) -> tuple[str, str]:
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"Unsupported file extension: .{ext}")
     app_logger.info(f"Attempting to download doc: {url}")
@@ -369,7 +568,10 @@ async def download_and_hash_document(url: str, ext: str) -> (str, str):
     app_logger.info(f"Downloading doc: {url}")
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
+            if response.status != 200:
+                raise HTTPException(status_code=400, detail=f"Failed to download document: HTTP {response.status}")
             content = await response.read()
+    
     docHash = hashlib.sha256(content).hexdigest()
 
     # ✅ Check for existing match in hash index
@@ -404,8 +606,68 @@ def load_document_sync(file_path: str, ext: str):
 
 
 async def load_document(file_path: str, ext: str):
-    """Async wrapper for document loading"""
+    """Async wrapper for document loading with PPT and image support"""
     app_logger.info(f"📚 Loading document with extension: {ext}")
+    
+    # NEW: Handle image files
+    if ext.lower() in ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'webp']:
+        app_logger.info(f"🖼️ Processing image file: {file_path}")
+        
+        try:
+            # Extract text directly from image using Gemini
+            extracted_text = await extract_text_from_image_with_gemini(file_path)
+            
+            # Create a Document object with the extracted text
+            doc = Document(
+                page_content=extracted_text,
+                metadata={
+                    "source": file_path,
+                    "file_type": "image",
+                    "extraction_method": "gemini_vision"
+                }
+            )
+            
+            return [doc]
+            
+        except Exception as e:
+            app_logger.error(f"Image processing failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to process image file: {str(e)}")
+    
+    # Handle PPT/PPTX files
+    if ext.lower() in ['ppt', 'pptx']:
+        app_logger.info(f"🎨 Processing PowerPoint file: {file_path}")
+        
+        try:
+            # Convert PPT to PDF
+            pdf_path = await convert_ppt_to_pdf(file_path)
+            
+            # Extract text using Gemini
+            extracted_text = await extract_text_from_pdf_with_gemini(pdf_path)
+            
+            # Create a Document object with the extracted text
+            doc = Document(
+                page_content=extracted_text,
+                metadata={
+                    "source": file_path,
+                    "converted_from": ext,
+                    "extraction_method": "gemini"
+                }
+            )
+            
+            # Clean up converted PDF
+            try:
+                os.remove(pdf_path)
+                app_logger.info(f"🗑️ Cleaned up temporary PDF: {pdf_path}")
+            except Exception as cleanup_e:
+                app_logger.warning(f"Failed to cleanup PDF: {cleanup_e}")
+                
+            return [doc]
+            
+        except Exception as e:
+            app_logger.error(f"PPT processing failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to process PowerPoint file: {str(e)}")
+    
+    # Handle regular document types
     return await asyncio.get_event_loop().run_in_executor(
         executor, load_document_sync, file_path, ext
     )
@@ -613,7 +875,7 @@ async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
         req = QARequest(**data)
     except Exception as e:
         app_logger.error(f" Error parsing request: {e}")
-        raise HTTPException(status_code=400, detail="invalid requuest format")
+        raise HTTPException(status_code=400, detail="invalid request format")
 
     total_start_time = time.time()
     app_logger.info(f"🎯 Starting RAG pipeline for {len(req.questions)} questions")
@@ -735,20 +997,22 @@ async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
         }
 
     except Exception as e:
-        app_logger.error(e)
+        app_logger.error(f"❌ Error in RAG pipeline: {e}")
+        app_logger.exception("Full error traceback:")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
     finally:
         # Clean up temp file asynchronously
         if os.path.exists(file_path):
-            #print("File hit bro ok")
-            #asyncio.create_task(async_remove_file(file_path))
+            # Uncomment the line below if you want to clean up files
+            # asyncio.create_task(async_remove_file(file_path))
             pass
 
 
 # ========== Startup/Shutdown Events ==========
 @app.on_event("startup")
 async def startup_event():
-    app_logger.info("🚀 API starting up with concurrency optimizations")
+    app_logger.info("🚀 API starting up with concurrency optimizations, PPT support, and image processing")
 
 
 @app.on_event("shutdown")
@@ -760,13 +1024,13 @@ async def shutdown_event():
 # ========== Health Check ==========
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "version": "2.5", "concurrency": "enabled"}
+    return {"status": "healthy", "version": "2.8", "concurrency": "enabled", "ppt_support": "enabled", "image_support": "enabled"}
 
 
 # ========== Root Endpoint ==========
 @app.get("/")
 async def root():
-    return {"message": "HackRX Document Q&A API", "version": "2.5", "docs": "/docs"}
+    return {"message": "HackRX Document Q&A API with PPT/PPTX and Image Support", "version": "2.8", "docs": "/docs"}
 
 
 if __name__ == "__main__":
