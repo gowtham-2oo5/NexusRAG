@@ -344,10 +344,30 @@ async def save_domain_to_cache(doc_hash: str, domain: str):
 
 async def save_extracted_text_to_cache(doc_hash: str, extracted_text: str):
     """Cache extracted text content to avoid re-processing"""
-    cache_path = get_extracted_text_cache_path(doc_hash)
-    async with aiofiles.open(cache_path, 'w', encoding='utf-8') as f:
-        await f.write(extracted_text)
-    app_logger.info(f"💾 Cached extracted text ({len(extracted_text)} chars) for document hash: {doc_hash}")
+    try:
+        if not extracted_text or len(extracted_text.strip()) == 0:
+            app_logger.warning(f"⚠️ Attempted to cache empty extracted text for {doc_hash}")
+            return
+            
+        cache_path = get_extracted_text_cache_path(doc_hash)
+        app_logger.info(f"💾 Writing {len(extracted_text)} chars to cache file: {cache_path}")
+        
+        async with aiofiles.open(cache_path, 'w', encoding='utf-8') as f:
+            await f.write(extracted_text)
+            
+        # Verify the file was written correctly
+        async with aiofiles.open(cache_path, 'r', encoding='utf-8') as f:
+            verification_content = await f.read()
+            
+        if len(verification_content) != len(extracted_text):
+            app_logger.error(f"❌ Cache verification failed for {doc_hash}: wrote {len(extracted_text)} chars but read {len(verification_content)} chars")
+        else:
+            app_logger.info(f"✅ Successfully cached and verified extracted text ({len(extracted_text)} chars) for document hash: {doc_hash}")
+            
+    except Exception as e:
+        app_logger.error(f"❌ Failed to cache extracted text for {doc_hash}: {e}")
+        import traceback
+        app_logger.error(f"❌ Full traceback: {traceback.format_exc()}")
 
 
 async def load_domain_from_cache(doc_hash: str) -> Optional[str]:
@@ -366,10 +386,14 @@ async def load_extracted_text_from_cache(doc_hash: str) -> Optional[str]:
     """Load cached extracted text content"""
     path = get_extracted_text_cache_path(doc_hash)
     if os.path.exists(path):
-        async with aiofiles.open(path, 'r', encoding='utf-8') as f:
-            content = await f.read()
-        app_logger.info(f"✅ Loaded cached extracted text ({len(content)} chars) for document hash: {doc_hash}")
-        return content
+        try:
+            async with aiofiles.open(path, 'r', encoding='utf-8') as f:
+                content = await f.read()
+            app_logger.info(f"✅ Loaded cached extracted text ({len(content)} chars) for document hash: {doc_hash}")
+            return content
+        except Exception as e:
+            app_logger.warning(f"⚠️ Failed to read cached text file {path}: {e}")
+            return None
     return None
 
 
@@ -1263,13 +1287,6 @@ async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
             
             return {
                 "answers": unsupported_answers,
-                "detected_domain": "Unknown",
-                "performance": {
-                    "total_time": f"{time.time() - total_start_time:.2f}s",
-                    "questions_processed": len(req.questions),
-                    "chunks_created": 0,
-                    "status": "file_too_large"
-                }
             }
         else:
             raise e  # Re-raise other ValueError exceptions
@@ -1288,8 +1305,9 @@ async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
             # Wait for cache checks
             cached_domain, cached_extracted_text = await asyncio.gather(cached_domain_task, cached_text_task)
             
-            if cached_extracted_text:
-                app_logger.info(f"✅ Using cached extracted text, skipping file processing")
+            # Check if we have valid cached text (not None and not empty)
+            if cached_extracted_text is not None and len(cached_extracted_text.strip()) > 0:
+                app_logger.info(f"✅ Using cached extracted text ({len(cached_extracted_text)} chars), skipping file processing")
                 # Create document from cached text
                 docs = [Document(
                     page_content=cached_extracted_text,
@@ -1300,11 +1318,32 @@ async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
                     }
                 )]
             else:
-                app_logger.info(f"⚠️ No cached text found, processing file: {file_path}")
+                if cached_extracted_text is not None:
+                    app_logger.warning(f"⚠️ Cached text file exists but is empty ({len(cached_extracted_text)} chars), re-processing file: {file_path}")
+                else:
+                    app_logger.info(f"⚠️ No cached text found, processing file: {file_path}")
                 # Process the document normally
                 docs = await load_document(file_path, ext)
-                # Cache the extracted text for future use
-                asyncio.create_task(save_extracted_text_to_cache(doc_hash, docs[0].page_content))
+                app_logger.info(f"📚 Loaded {len(docs)} documents, checking content...")
+                
+                # Debug: Check first few docs to see what's happening
+                for i, doc in enumerate(docs[:3]):
+                    content_preview = doc.page_content[:100] if doc.page_content else "None"
+                    app_logger.info(f"📄 Doc {i}: content length = {len(doc.page_content) if doc.page_content else 0}, preview = '{content_preview}...'")
+                
+                # Cache the extracted text for future use - await to ensure it completes
+                if docs and len(docs) > 0:
+                    # Combine all document content for caching
+                    combined_content = "\n\n".join([doc.page_content for doc in docs if doc.page_content])
+                    if combined_content and len(combined_content.strip()) > 0:
+                        app_logger.info(f"💾 Saving extracted text to cache ({len(combined_content)} chars from {len(docs)} pages)")
+                        await save_extracted_text_to_cache(doc_hash, combined_content)
+                    else:
+                        app_logger.warning(f"⚠️ No valid document content to cache for {doc_hash}")
+                        app_logger.warning(f"⚠️ docs: {len(docs)}, but all pages appear to be empty")
+                else:
+                    app_logger.warning(f"⚠️ No documents loaded for {doc_hash}")
+                    app_logger.warning(f"⚠️ docs: {len(docs) if docs else 'None'}")
             
             app_logger.info(f"📄 Document content ready: {len(docs)} pages")
             
@@ -1335,9 +1374,26 @@ async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
             docs_task = asyncio.create_task(load_document(file_path, ext))
             docs = await docs_task
             app_logger.info(f"📄 Document loaded: {len(docs)} pages")
+            app_logger.info(f"📚 Loaded {len(docs)} documents, checking content...")
             
-            # Cache the extracted text for future use
-            asyncio.create_task(save_extracted_text_to_cache(doc_hash, docs[0].page_content))
+            # Debug: Check first few docs to see what's happening
+            for i, doc in enumerate(docs[:3]):
+                content_preview = doc.page_content[:100] if doc.page_content else "None"
+                app_logger.info(f"📄 Doc {i}: content length = {len(doc.page_content) if doc.page_content else 0}, preview = '{content_preview}...'")
+            
+            # Cache the extracted text for future use - await to ensure it completes
+            if docs and len(docs) > 0:
+                # Combine all document content for caching
+                combined_content = "\n\n".join([doc.page_content for doc in docs if doc.page_content])
+                if combined_content and len(combined_content.strip()) > 0:
+                    app_logger.info(f"💾 Saving extracted text to cache ({len(combined_content)} chars from {len(docs)} pages)")
+                    await save_extracted_text_to_cache(doc_hash, combined_content)
+                else:
+                    app_logger.warning(f"⚠️ No valid document content to cache for {doc_hash}")
+                    app_logger.warning(f"⚠️ docs: {len(docs)}, but all pages appear to be empty")
+            else:
+                app_logger.warning(f"⚠️ No documents loaded for {doc_hash}")
+                app_logger.warning(f"⚠️ docs: {len(docs) if docs else 'None'}")
             
             # Split documents asynchronously
             chunks = await split_document(docs)
@@ -1412,12 +1468,6 @@ async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
 
         return {
             "answers": processed_answers,
-            "detected_domain": domain,
-            "performance": {
-                "total_time": f"{total_time:.2f}s",
-                "questions_processed": len(req.questions),
-                "chunks_created": len(chunks)
-            }
         }
 
     except Exception as e:
