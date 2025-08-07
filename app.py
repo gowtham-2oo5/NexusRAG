@@ -8,6 +8,8 @@ from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor
 import aiofiles
 import aiohttp
+import pandas as pd  # For Excel processing
+import zipfile  # For ZIP file handling
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -25,7 +27,7 @@ import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 # Initialize FastAPI app FIRST
-app = FastAPI(title="HackRX Document Q&A API", version="2.8")
+app = FastAPI(title="HackRX Document Q&A API", version="3.0")
 
 # ========== Constants ==========
 GPT_PRIMARY = "gpt-4o-mini"
@@ -33,9 +35,10 @@ GPT_FALLBACK = "gpt-4o-mini"
 EMBED_MODEL = "text-embedding-3-large"
 CHUNK_SIZE = 512
 CHUNK_OVERLAP = 50
-ALLOWED_EXTENSIONS = {"pdf", "txt", "docx", "ppt", "pptx", "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"}  # Added ppt, pptx, images
+ALLOWED_EXTENSIONS = {"pdf", "txt", "docx", "ppt", "pptx", "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp", "xlsx", "xls", "zip", "bin"}  # Added ppt, pptx, images, excel, zip, bin
 MAX_WORKERS = 8  # Increased for hackathon performance
 EMBEDDING_BATCH_SIZE = 20  # Larger batches - you have good rate limits
+MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024 * 1024  # 1GB file size limit
 
 # Rate limit optimized settings
 GPT_4O_CONCURRENT = 8  # 500 RPM = ~8 per second max
@@ -284,10 +287,17 @@ Instructions:
 - If the question is completely unrelated to {domain} and the document topic, respond with: "Sorry, this question is out of the context of the document."
 - Be helpful, accurate, and professional. Draw from both the document and your {domain} expertise.
 - Provide concise but complete answers (2-3 sentences when needed for clarity)
+- For structured data (Excel, CSV), look for exact matches in names, IDs, phone numbers, addresses, etc.
+- When searching for people by name, check all name variations and partial matches
+- For numerical queries (highest/lowest values), scan through all records to find the correct answer
+- Always provide specific details like phone numbers, addresses, or other requested information when available
+
 For example:
-    -If the document is about automobile user manuals and the question is "Can I put thums up instead of oil" th answer should be "No, you should not use thumbs up instead of oil. The document specifies that only the recommended oil type should be used for optimal performance."
-    -If the document is about Indian Consitution and the question is "Article 21 significance" the answer should be "Article 21 of the Indian Constitution guarantees the right to life and personal liberty. It ensures that no person shall be deprived of their life or personal liberty except according to the procedure established by law."
+    -If the document is about automobile user manuals and the question is "Can I put thums up instead of oil" the answer should be "No, you should not use thumbs up instead of oil. The document specifies that only the recommended oil type should be used for optimal performance."
+    -If the document is about Indian Constitution and the question is "Article 21 significance" the answer should be "Article 21 of the Indian Constitution guarantees the right to life and personal liberty. It ensures that no person shall be deprived of their life or personal liberty except according to the procedure established by law."
     -If the document is about automobile user manuals and the question is "Write a code to check if a number is prime" the answer should be "Sorry, this question is out of the context of the document."
+    -If the document contains salary data and the question is "Who is the highest paid individual in pincode 400001?" then search through all records with pincode 400001 and find the person with the highest salary, including their contact details.
+
 Document Context:
 {context}
 
@@ -528,9 +538,249 @@ async def extract_text_from_image_with_gemini(image_path: str) -> str:
     )
 
 
+def process_excel_file_sync(excel_path: str) -> str:
+    """Synchronous Excel file processing to extract structured data as text"""
+    try:
+        app_logger.info(f"Processing Excel file: {excel_path}")
+        
+        # Read all sheets from the Excel file
+        excel_file = pd.ExcelFile(excel_path)
+        all_sheets_text = []
+        
+        for sheet_name in excel_file.sheet_names:
+            app_logger.info(f"Processing sheet: {sheet_name}")
+            
+            # Read the sheet
+            df = pd.read_excel(excel_path, sheet_name=sheet_name)
+            
+            # Convert DataFrame to a structured text format
+            sheet_text = f"SHEET: {sheet_name}\n"
+            sheet_text += "=" * 50 + "\n"
+            
+            # Add column headers information
+            if not df.empty:
+                sheet_text += f"COLUMNS: {', '.join(df.columns.astype(str))}\n"
+                sheet_text += f"TOTAL ROWS: {len(df)}\n"
+                sheet_text += "-" * 30 + "\n"
+                
+                # Convert each row to a readable format
+                for index, row in df.iterrows():
+                    row_text = f"ROW {index + 1}:\n"
+                    for col in df.columns:
+                        value = row[col]
+                        # Handle NaN values
+                        if pd.isna(value):
+                            value = "N/A"
+                        row_text += f"  {col}: {value}\n"
+                    row_text += "\n"
+                    sheet_text += row_text
+                    
+                # Also add a summary format for easier searching
+                sheet_text += "\n" + "SUMMARY FORMAT" + "\n"
+                sheet_text += "-" * 20 + "\n"
+                
+                # Create searchable text entries for each row
+                for index, row in df.iterrows():
+                    summary_line = f"Record {index + 1}: "
+                    row_parts = []
+                    for col in df.columns:
+                        value = row[col]
+                        if pd.notna(value):
+                            row_parts.append(f"{col}={value}")
+                    summary_line += ", ".join(row_parts)
+                    sheet_text += summary_line + "\n"
+            else:
+                sheet_text += "EMPTY SHEET\n"
+            
+            sheet_text += "\n" + "=" * 50 + "\n\n"
+            all_sheets_text.append(sheet_text)
+        
+        # Combine all sheets
+        final_text = f"EXCEL FILE: {os.path.basename(excel_path)}\n"
+        final_text += "TOTAL SHEETS: " + str(len(excel_file.sheet_names)) + "\n"
+        final_text += "\n".join(all_sheets_text)
+        
+        app_logger.info(f"✅ Successfully processed Excel file with {len(excel_file.sheet_names)} sheets")
+        app_logger.info(f"✅ Generated {len(final_text)} characters of searchable text")
+        
+        return final_text
+        
+    except Exception as e:
+        app_logger.error(f"Excel processing failed: {e}")
+        raise Exception(f"Failed to process Excel file: {e}")
+
+
+async def process_excel_file(excel_path: str) -> str:
+    """Async wrapper for Excel file processing"""
+    return await asyncio.get_event_loop().run_in_executor(
+        executor, process_excel_file_sync, excel_path
+    )
+
+
+def process_zip_file_sync(zip_path: str) -> str:
+    """Synchronous ZIP file processing to extract and analyze contents"""
+    try:
+        app_logger.info(f"Processing ZIP file: {zip_path}")
+        
+        extracted_content = []
+        extracted_content.append(f"ZIP FILE: {os.path.basename(zip_path)}")
+        extracted_content.append("=" * 60)
+        
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            file_list = zip_ref.namelist()
+            extracted_content.append(f"TOTAL FILES IN ZIP: {len(file_list)}")
+            extracted_content.append("-" * 40)
+            
+            # List all files in the ZIP
+            extracted_content.append("FILE STRUCTURE:")
+            for file_name in file_list:
+                file_info = zip_ref.getinfo(file_name)
+                size_mb = file_info.file_size / (1024 * 1024)
+                extracted_content.append(f"  - {file_name} (Size: {size_mb:.2f} MB)")
+            
+            extracted_content.append("\n" + "-" * 40)
+            extracted_content.append("EXTRACTABLE TEXT CONTENT:")
+            extracted_content.append("-" * 40)
+            
+            # Try to extract text from supported files within the ZIP
+            supported_text_extensions = {'.txt', '.md', '.csv', '.json', '.xml', '.html', '.py', '.js', '.css'}
+            
+            for file_name in file_list:
+                if not file_name.endswith('/'):  # Skip directories
+                    file_ext = os.path.splitext(file_name.lower())[1]
+                    
+                    if file_ext in supported_text_extensions:
+                        try:
+                            with zip_ref.open(file_name) as file:
+                                content = file.read()
+                                # Try to decode as text
+                                try:
+                                    text_content = content.decode('utf-8')
+                                    extracted_content.append(f"\nFILE: {file_name}")
+                                    extracted_content.append("~" * 30)
+                                    # Limit text content to avoid overwhelming
+                                    if len(text_content) > 5000:
+                                        text_content = text_content[:5000] + "\n... [Content truncated]"
+                                    extracted_content.append(text_content)
+                                except UnicodeDecodeError:
+                                    extracted_content.append(f"\nFILE: {file_name} - [Binary content, cannot extract text]")
+                        except Exception as e:
+                            extracted_content.append(f"\nFILE: {file_name} - [Error reading file: {str(e)}]")
+                    else:
+                        extracted_content.append(f"\nFILE: {file_name} - [Unsupported file type for text extraction: {file_ext}]")
+        
+        final_text = "\n".join(extracted_content)
+        app_logger.info(f"✅ Successfully processed ZIP file with {len(file_list)} files")
+        app_logger.info(f"✅ Generated {len(final_text)} characters of searchable text from ZIP")
+        
+        return final_text
+        
+    except Exception as e:
+        app_logger.error(f"ZIP processing failed: {e}")
+        raise Exception(f"Failed to process ZIP file: {e}")
+
+
+async def process_zip_file(zip_path: str) -> str:
+    """Async wrapper for ZIP file processing"""
+    return await asyncio.get_event_loop().run_in_executor(
+        executor, process_zip_file_sync, zip_path
+    )
+
+
+def process_bin_file_sync(bin_path: str) -> str:
+    """Synchronous BIN file processing - limited analysis of binary files"""
+    try:
+        app_logger.info(f"Processing BIN file: {bin_path}")
+        
+        file_size = os.path.getsize(bin_path)
+        file_size_mb = file_size / (1024 * 1024)
+        
+        extracted_content = []
+        extracted_content.append(f"BINARY FILE: {os.path.basename(bin_path)}")
+        extracted_content.append("=" * 60)
+        extracted_content.append(f"FILE SIZE: {file_size_mb:.2f} MB ({file_size} bytes)")
+        extracted_content.append("-" * 40)
+        
+        # Read first few bytes to try to identify file type
+        with open(bin_path, 'rb') as f:
+            header_bytes = f.read(512)  # Read first 512 bytes
+            
+        # Convert to hex for analysis
+        hex_header = header_bytes.hex()
+        extracted_content.append(f"FILE HEADER (first 512 bytes in hex): {hex_header}")
+        
+        # Try to detect common file signatures
+        file_signatures = {
+            b'\x50\x4B\x03\x04': 'ZIP Archive',
+            b'\x50\x4B\x05\x06': 'ZIP Archive (empty)',
+            b'\x50\x4B\x07\x08': 'ZIP Archive (spanned)',
+            b'\x52\x61\x72\x21': 'RAR Archive',
+            b'\x7F\x45\x4C\x46': 'ELF Executable',
+            b'\x4D\x5A': 'Windows Executable (PE)',
+            b'\x89\x50\x4E\x47': 'PNG Image',
+            b'\xFF\xD8\xFF': 'JPEG Image',
+            b'\x47\x49\x46\x38': 'GIF Image',
+            b'\x25\x50\x44\x46': 'PDF Document',
+            b'\xD0\xCF\x11\xE0': 'Microsoft Office Document',
+        }
+        
+        detected_type = "Unknown Binary File"
+        for signature, file_type in file_signatures.items():
+            if header_bytes.startswith(signature):
+                detected_type = file_type
+                break
+        
+        extracted_content.append(f"DETECTED FILE TYPE: {detected_type}")
+        extracted_content.append("-" * 40)
+        
+        # Try to extract any printable strings (useful for some binary formats)
+        printable_strings = []
+        current_string = ""
+        
+        for byte in header_bytes:
+            if 32 <= byte <= 126:  # Printable ASCII range
+                current_string += chr(byte)
+            else:
+                if len(current_string) >= 4:  # Only keep strings of 4+ characters
+                    printable_strings.append(current_string)
+                current_string = ""
+        
+        if current_string and len(current_string) >= 4:
+            printable_strings.append(current_string)
+        
+        if printable_strings:
+            extracted_content.append("EXTRACTABLE STRINGS FROM HEADER:")
+            for string in printable_strings[:20]:  # Limit to first 20 strings
+                extracted_content.append(f"  - {string}")
+            if len(printable_strings) > 20:
+                extracted_content.append(f"  ... and {len(printable_strings) - 20} more strings")
+        else:
+            extracted_content.append("NO READABLE STRINGS FOUND IN HEADER")
+        
+        extracted_content.append("\nNOTE: This is a binary file. Limited text extraction is possible.")
+        extracted_content.append("For comprehensive analysis, please convert to a supported text format.")
+        
+        final_text = "\n".join(extracted_content)
+        app_logger.info(f"✅ Successfully analyzed BIN file ({file_size_mb:.2f} MB)")
+        app_logger.info(f"✅ Generated {len(final_text)} characters of analysis text")
+        
+        return final_text
+        
+    except Exception as e:
+        app_logger.error(f"BIN file processing failed: {e}")
+        raise Exception(f"Failed to process BIN file: {e}")
+
+
+async def process_bin_file(bin_path: str) -> str:
+    """Async wrapper for BIN file processing"""
+    return await asyncio.get_event_loop().run_in_executor(
+        executor, process_bin_file_sync, bin_path
+    )
+
+
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 DOCS_DIR = os.path.join(tempfile.gettempdir(), "hackrx_docs")
-ALLOWED_EXTENSIONS = {"pdf", "docx", "txt", "md", "ppt", "pptx", "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"}  # Updated with images
+ALLOWED_EXTENSIONS = {"pdf", "docx", "txt", "md", "ppt", "pptx", "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp", "xlsx", "xls", "zip", "bin"}  # Updated with images, excel, zip, bin
 os.makedirs(DOCS_DIR, exist_ok=True)
 
 HASH_INDEX_PATH = os.path.join(DOCS_DIR, "doc_hashes.json")
@@ -558,19 +808,38 @@ async def download_and_hash_document(url: str, ext: str) -> tuple[str, str]:
 
     # ✅ Check for direct match
     if os.path.exists(potentialFile):
+        file_size = os.path.getsize(potentialFile)
+        if file_size > MAX_FILE_SIZE_BYTES:
+            app_logger.warning(f"Cached file exceeds size limit: {file_size / (1024*1024*1024):.2f} GB")
+            raise ValueError("FILE_TOO_LARGE")
+        
         async with aiofiles.open(potentialFile, 'rb') as f:
             content = await f.read()
         docHash = hashlib.sha256(content).hexdigest()
         app_logger.info(f"Doc already cached: {potentialFile}")
         return potentialFile, docHash
 
-    # ✅ Download and hash the document once
+    # ✅ Download and check file size before saving
     app_logger.info(f"Downloading doc: {url}")
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             if response.status != 200:
                 raise HTTPException(status_code=400, detail=f"Failed to download document: HTTP {response.status}")
+            
+            # Check content length header if available
+            content_length = response.headers.get('content-length')
+            if content_length:
+                file_size = int(content_length)
+                if file_size > MAX_FILE_SIZE_BYTES:
+                    app_logger.warning(f"File size exceeds limit: {file_size / (1024*1024*1024):.2f} GB")
+                    raise ValueError("FILE_TOO_LARGE")
+            
             content = await response.read()
+            
+            # Double-check actual content size
+            if len(content) > MAX_FILE_SIZE_BYTES:
+                app_logger.warning(f"Downloaded content exceeds size limit: {len(content) / (1024*1024*1024):.2f} GB")
+                raise ValueError("FILE_TOO_LARGE")
     
     docHash = hashlib.sha256(content).hexdigest()
 
@@ -606,10 +875,82 @@ def load_document_sync(file_path: str, ext: str):
 
 
 async def load_document(file_path: str, ext: str):
-    """Async wrapper for document loading with PPT and image support"""
+    """Async wrapper for document loading with PPT, image, Excel, ZIP, and BIN support"""
     app_logger.info(f"📚 Loading document with extension: {ext}")
     
-    # NEW: Handle image files
+    # NEW: Handle ZIP files
+    if ext.lower() == 'zip':
+        app_logger.info(f"📦 Processing ZIP file: {file_path}")
+        
+        try:
+            # Process ZIP file and extract contents information
+            extracted_text = await process_zip_file(file_path)
+            
+            # Create a Document object with the extracted text
+            doc = Document(
+                page_content=extracted_text,
+                metadata={
+                    "source": file_path,
+                    "file_type": "zip",
+                    "extraction_method": "zip_analysis"
+                }
+            )
+            
+            return [doc]
+            
+        except Exception as e:
+            app_logger.error(f"ZIP processing failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to process ZIP file: {str(e)}")
+    
+    # NEW: Handle BIN files
+    if ext.lower() == 'bin':
+        app_logger.info(f"🔧 Processing BIN file: {file_path}")
+        
+        try:
+            # Process BIN file and extract limited information
+            extracted_text = await process_bin_file(file_path)
+            
+            # Create a Document object with the extracted text
+            doc = Document(
+                page_content=extracted_text,
+                metadata={
+                    "source": file_path,
+                    "file_type": "binary",
+                    "extraction_method": "binary_analysis"
+                }
+            )
+            
+            return [doc]
+            
+        except Exception as e:
+            app_logger.error(f"BIN processing failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to process BIN file: {str(e)}")
+    
+    # Handle Excel files
+    if ext.lower() in ['xlsx', 'xls']:
+        app_logger.info(f"📊 Processing Excel file: {file_path}")
+        
+        try:
+            # Process Excel file and extract structured data as text
+            extracted_text = await process_excel_file(file_path)
+            
+            # Create a Document object with the extracted text
+            doc = Document(
+                page_content=extracted_text,
+                metadata={
+                    "source": file_path,
+                    "file_type": "excel",
+                    "extraction_method": "pandas_structured"
+                }
+            )
+            
+            return [doc]
+            
+        except Exception as e:
+            app_logger.error(f"Excel processing failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to process Excel file: {str(e)}")
+    
+    # Handle image files
     if ext.lower() in ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'webp']:
         app_logger.info(f"🖼️ Processing image file: {file_path}")
         
@@ -881,7 +1222,33 @@ async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
     app_logger.info(f"🎯 Starting RAG pipeline for {len(req.questions)} questions")
 
     ext = req.documents.split('.')[-1].split('?')[0].lower()
-    file_path, doc_hash = await download_and_hash_document(req.documents, ext)
+    
+    # Handle file size limit gracefully
+    try:
+        file_path, doc_hash = await download_and_hash_document(req.documents, ext)
+    except ValueError as e:
+        if str(e) == "FILE_TOO_LARGE":
+            app_logger.warning(f"File size exceeds 1GB limit, returning graceful response")
+            # Return responses indicating file is too large but not throwing error
+            unsupported_answers = []
+            for question in req.questions:
+                unsupported_answers.append(
+                    "I apologize, but this file exceeds our current processing limit of 1GB. "
+                    "Please try with a smaller file or contact support for assistance with large files."
+                )
+            
+            return {
+                "answers": unsupported_answers,
+                "detected_domain": "Unknown",
+                "performance": {
+                    "total_time": f"{time.time() - total_start_time:.2f}s",
+                    "questions_processed": len(req.questions),
+                    "chunks_created": 0,
+                    "status": "file_too_large"
+                }
+            }
+        else:
+            raise e  # Re-raise other ValueError exceptions
 
     try:
         faiss_folder = get_faiss_folder(doc_hash)
@@ -1012,7 +1379,7 @@ async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
 # ========== Startup/Shutdown Events ==========
 @app.on_event("startup")
 async def startup_event():
-    app_logger.info("🚀 API starting up with concurrency optimizations, PPT support, and image processing")
+    app_logger.info("🚀 API starting up with comprehensive file support: PPT, Images, Excel, ZIP, BIN with 1GB size limit")
 
 
 @app.on_event("shutdown")
@@ -1024,13 +1391,23 @@ async def shutdown_event():
 # ========== Health Check ==========
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "version": "2.8", "concurrency": "enabled", "ppt_support": "enabled", "image_support": "enabled"}
+    return {
+        "status": "healthy", 
+        "version": "3.0", 
+        "concurrency": "enabled", 
+        "ppt_support": "enabled", 
+        "image_support": "enabled", 
+        "excel_support": "enabled",
+        "zip_support": "enabled",
+        "bin_support": "enabled",
+        "max_file_size": "1GB"
+    }
 
 
 # ========== Root Endpoint ==========
 @app.get("/")
 async def root():
-    return {"message": "HackRX Document Q&A API with PPT/PPTX and Image Support", "version": "2.8", "docs": "/docs"}
+    return {"message": "HackRX Document Q&A API with comprehensive file support", "version": "3.0", "supported_formats": ["PDF", "DOCX", "TXT", "PPT", "PPTX", "Images", "Excel", "ZIP", "BIN"], "max_file_size": "1GB", "docs": "/docs"}
 
 
 if __name__ == "__main__":
