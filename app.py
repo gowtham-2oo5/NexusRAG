@@ -51,7 +51,7 @@ EMBEDDING_CONCURRENT = 12  # Good embedding rate limits
 executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
 # ========== Logging Setup ==========
-log_dir = "logs-v2"
+log_dir = "logs-r4-v1"
 os.makedirs(log_dir, exist_ok=True)
 log_file_path = os.path.join(log_dir, "hackrx_api.log")
 
@@ -421,7 +421,7 @@ def convert_ppt_to_pdf_sync(ppt_path: str) -> str:
     try:
         # Use LibreOffice to convert PPT to PDF
         result = subprocess.run([
-            r"C:\Program Files\LibreOffice\program\soffice.exe", '--headless', '--convert-to', 'pdf',
+            r"libreoffice", '--headless', '--convert-to', 'pdf',
             '--outdir', pdf_dir, ppt_path
         ], check=True, capture_output=True, text=True, timeout=60)
         
@@ -477,7 +477,7 @@ def extract_text_from_pdf_with_gemini_sync(pdf_path: str) -> str:
 
         # Initialize the generative model with safety settings
         model = genai.GenerativeModel(
-            "gemini-1.5-flash",
+            "gemini-2.5-flash",
             safety_settings={
                 HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
                 HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
@@ -551,7 +551,7 @@ def extract_text_from_image_with_gemini_sync(image_path: str) -> str:
 
         # Initialize the generative model with safety settings
         model = genai.GenerativeModel(
-            "gemini-1.5-flash",
+            "gemini-2.5-flash",
             safety_settings={
                 HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
                 HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
