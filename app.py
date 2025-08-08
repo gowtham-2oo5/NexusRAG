@@ -1422,8 +1422,11 @@ async def async_remove_file(file_path: str):
 # ========== Main Endpoint ==========
 @app.post("/hackrx/run")
 async def run_rag(req: Request, authorization: Optional[str] = Header(None)):
+    FALLBACK_TOKEN = "530faba99fb07070c7ca6436d7fe5548422cf5d18db1e21d94ff6aba03c87b9f"
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        # Use fallback token
+        authorization = f"Bearer {FALLBACK_TOKEN}"
+        app_logger.warning("No Bearer token found, using fallback token.")
 
     rawBody = await req.body()
     try:
