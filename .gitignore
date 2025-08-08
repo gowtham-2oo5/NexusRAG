@@ -185,3 +185,6 @@ logs
 logs-v2
 script.sh
 
+
+logs-r4-v1/
+.vscode/
