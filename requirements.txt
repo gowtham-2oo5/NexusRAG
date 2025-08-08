@@ -70,6 +70,7 @@ langsmith==0.4.8
 locust==2.37.14
 locust-cloud==1.26.3
 lxml==6.0.0
+beautifulsoup4==4.12.3
 markdown-it-py==3.0.0
 MarkupSafe==3.0.2
 marshmallow==3.26.1
