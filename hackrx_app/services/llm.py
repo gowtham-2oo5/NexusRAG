@@ -9,6 +9,9 @@ from hackrx_app.prompts import (
     domain_detection_template,
     enhanced_prompt_template,
     fact_checking_template,
+    factual_content_template,
+    challenge_analysis_template,
+    api_execution_template
 )
 from hackrx_app.utils.constants import GPT_FALLBACK, GPT_PRIMARY
 
@@ -95,7 +98,7 @@ async def ask_with_context(question: str, context_docs: List[Document], domain: 
 
     if token:
         if ("secret token" in q_lower) or ("get the token" in q_lower) or ("provide the token" in q_lower):
-            return token
+            return "Fetched Secret Token: " + token
         count_match = re.search(r"how many\s+([a-zA-Z0-9])'?s?\s+are\s+there\s+in\s+the\s+token", q_lower)
         if count_match:
             ch = count_match.group(1)
@@ -104,6 +107,9 @@ async def ask_with_context(question: str, context_docs: List[Document], domain: 
     if is_general_knowledge_question(question):
         app_logger.info(f"🔍 Detected general knowledge question: {question[:50]}...")
         prompt = fact_checking_template.format(context=context, question=question, domain=domain)
+    elif domain.lower() in ['technology/software', 'news', 'media']:
+        app_logger.info(f"🎯 Using factual content template for domain: {domain}")
+        prompt = factual_content_template.format(context=context, question=question, domain=domain)
     else:
         prompt = enhanced_prompt_template.format(context=context, question=question, domain=domain)
 
@@ -123,3 +129,39 @@ async def ask_with_context(question: str, context_docs: List[Document], domain: 
         raise e
 
 
+async def analyze_challenge_document(document_content: str, app_logger) -> str:
+    """Analyze a challenge document and generate step-by-step instructions"""
+    try:
+        llm = ChatOpenAI(model_name=GPT_PRIMARY, temperature=0.1)
+        prompt = challenge_analysis_template.format(document_content=document_content)
+        result = await llm.ainvoke(prompt)
+        return result.content.strip()
+    except RateLimitError:
+        app_logger.warning("⚠️ GPT-4o rate limited. Falling back to 4o-mini for challenge analysis")
+        fallback_llm = ChatOpenAI(model_name=GPT_FALLBACK, temperature=0.1)
+        result = await fallback_llm.ainvoke(prompt)
+        return result.content.strip()
+    except Exception as e:
+        app_logger.exception("❌ Challenge analysis error")
+        raise e
+
+
+async def execute_instruction_with_llm(instruction: str, previous_results: str, memory_data: str, app_logger) -> str:
+    """Execute an instruction step using LLM guidance"""
+    try:
+        llm = ChatOpenAI(model_name=GPT_PRIMARY, temperature=0.1)
+        prompt = api_execution_template.format(
+            instruction=instruction,
+            previous_results=previous_results,
+            memory_data=memory_data
+        )
+        result = await llm.ainvoke(prompt)
+        return result.content.strip()
+    except RateLimitError:
+        app_logger.warning("⚠️ GPT-4o rate limited. Falling back to 4o-mini for instruction execution")
+        fallback_llm = ChatOpenAI(model_name=GPT_FALLBACK, temperature=0.1)
+        result = await fallback_llm.ainvoke(prompt)
+        return result.content.strip()
+    except Exception as e:
+        app_logger.exception("❌ Instruction execution error")
+        raise e
