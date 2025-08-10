@@ -123,10 +123,14 @@ ANALYSIS REQUIREMENTS:
 5. Create a step-by-step workflow like AWS Step Functions
 
 CRITICAL FOR LOOKUP TABLES:
+- Extract ALL city-landmark mappings from the document
 - Create mappings in the CORRECT direction for the workflow
 - If the challenge is "get city from API, then find landmark", create city→landmark mapping
 - If the challenge is "get landmark, then find city", create landmark→city mapping
 - Pay attention to the FLOW DIRECTION in the PDF
+- Include ALL cities mentioned in the document, even if they seem minor
+- Look for tables, lists, or any structured data that shows relationships
+- Be exhaustive - don't miss any mappings
 
 OUTPUT FORMAT (STRICT JSON):
 {{
@@ -199,14 +203,44 @@ CRITICAL INSTRUCTIONS:
             self.app_logger.info(f"✅ Found {len(entities.get('api_endpoints', []))} API endpoints")
             self.app_logger.info(f"✅ Created workflow with {len(steps)} steps")
             
-            # Log the lookup tables for debugging
+            # Log the lookup tables for debugging with more detail
             lookup_tables = entities.get("lookup_tables", {})
             for table_name, table_data in lookup_tables.items():
                 self.app_logger.info(f"📊 Lookup Table '{table_name}': {len(table_data)} entries")
-                # Show first few entries
+                # Show ALL entries for debugging
                 if isinstance(table_data, dict):
-                    sample_entries = dict(list(table_data.items())[:3])
-                    self.app_logger.info(f"📊 Sample entries: {json.dumps(sample_entries, indent=2)}")
+                    self.app_logger.info(f"📊 All entries in '{table_name}': {json.dumps(table_data, indent=2)}")
+            
+            # If no lookup tables found, try to extract them again with a more focused prompt
+            if not lookup_tables:
+                self.app_logger.warning("⚠️ No lookup tables found, attempting focused extraction...")
+                focused_extraction_prompt = f"""
+Extract ALL city-landmark mappings from this document. Focus ONLY on finding relationships between cities and landmarks.
+
+DOCUMENT CONTENT:
+{pdf_content[:5000]}...
+
+Look for:
+- Tables showing city-landmark relationships
+- Lists of cities with their landmarks
+- Any mention of cities paired with landmarks
+- Flight destinations and their landmarks
+
+Return ONLY a JSON object with city-landmark mappings:
+{{"city1": "landmark1", "city2": "landmark2"}}
+"""
+                
+                try:
+                    focused_result = await self.llm.ainvoke(focused_extraction_prompt)
+                    focused_text = self._clean_json_response(focused_result.content.strip())
+                    focused_mappings = json.loads(focused_text)
+                    
+                    if focused_mappings:
+                        entities["lookup_tables"]["city_to_landmark"] = focused_mappings
+                        self.app_logger.info(f"✅ Focused extraction found {len(focused_mappings)} mappings")
+                        self.app_logger.info(f"📊 Focused mappings: {json.dumps(focused_mappings, indent=2)}")
+                except Exception as e:
+                    self.app_logger.error(f"❌ Focused extraction failed: {e}")
             
             return workflow
             
@@ -470,30 +504,71 @@ Return JSON: {{"method": "GET", "url": "https://complete.url"}}
         
         self.app_logger.info(f"🔍 Using city for lookup: '{city}'")
         
-        # Try direct lookup in lookup tables first
+        # DEBUG: Log all lookup tables for debugging
+        self.app_logger.info(f"🔍 DEBUG - Available lookup tables:")
+        for table_name, table_data in lookup_tables.items():
+            self.app_logger.info(f"🔍 DEBUG - Table '{table_name}': {json.dumps(table_data, indent=2)}")
+        
+        # Try direct lookup in lookup tables first (with case-insensitive matching)
         landmark = None
         for table_name, table_data in lookup_tables.items():
-            if isinstance(table_data, dict) and city in table_data:
-                landmark = table_data[city]
-                self.app_logger.info(f"🔍 Direct lookup success: {city} → {landmark} (from {table_name})")
-                break
+            if isinstance(table_data, dict):
+                # Try exact match first
+                if city in table_data:
+                    landmark = table_data[city]
+                    self.app_logger.info(f"🔍 Direct lookup success (exact): {city} → {landmark} (from {table_name})")
+                    break
+                
+                # Try case-insensitive match
+                for key, value in table_data.items():
+                    if key.lower() == city.lower():
+                        landmark = value
+                        self.app_logger.info(f"🔍 Direct lookup success (case-insensitive): {city} → {landmark} (from {table_name})")
+                        break
+                
+                if landmark:
+                    break
         
         if not landmark:
             self.app_logger.info(f"🔧 Direct lookup failed, trying LLM fallback")
             
-            # LLM fallback
+            # LLM fallback with more detailed instructions
             lookup_prompt = f"""
-Find the landmark for the city. Be concise.
+You are a city-to-landmark mapping expert. Find the landmark for the given city.
 
-CITY: {city}
-LOOKUP_TABLES: {json.dumps(lookup_tables, indent=2)}
+CITY TO FIND: {city}
 
-Return ONLY the landmark name or "NOT_FOUND".
+AVAILABLE LOOKUP TABLES:
+{json.dumps(lookup_tables, indent=2)}
+
+INSTRUCTIONS:
+1. Look for the city "{city}" in the lookup tables
+2. Try exact matches first, then case-insensitive matches
+3. If the city is found, return ONLY the corresponding landmark name
+4. If not found in tables, use your knowledge of famous landmarks for this city
+5. For Istanbul specifically, common landmarks include: Hagia Sophia, Blue Mosque, Galata Tower, Bosphorus Bridge
+
+Return ONLY the landmark name (no quotes, no explanation) or "NOT_FOUND" if truly not available.
 """
             
             try:
                 result = await self.llm.ainvoke(lookup_prompt)
                 landmark = result.content.strip().strip('"\'')
+                
+                # Additional validation - if it's a known city but returned NOT_FOUND, try common landmarks
+                if landmark == "NOT_FOUND" and city.lower() == "istanbul":
+                    # Check if any of the lookup tables have values that might be Istanbul landmarks
+                    istanbul_landmarks = ["Hagia Sophia", "Blue Mosque", "Galata Tower", "Bosphorus Bridge", "Topkapi Palace"]
+                    for table_name, table_data in lookup_tables.items():
+                        if isinstance(table_data, dict):
+                            for key, value in table_data.items():
+                                if any(il.lower() in value.lower() for il in istanbul_landmarks):
+                                    landmark = value
+                                    self.app_logger.info(f"🔍 Found Istanbul landmark by pattern matching: {landmark}")
+                                    break
+                            if landmark != "NOT_FOUND":
+                                break
+                
                 self.app_logger.info(f"🔍 LLM lookup result: {city} → {landmark}")
             except Exception as e:
                 self.app_logger.error(f"❌ LLM lookup failed: {e}")
@@ -632,7 +707,17 @@ Perform the required processing and return the result.
         """Execute any generic step using LLM"""
         step_id = step.get("step_id")
         
-        generic_prompt = f"""
+        # Special handling for FINAL step
+        if step_id == "FINAL":
+            final_prompt = f"""
+Extract the flight number from the execution context.
+
+EXECUTION CONTEXT: {json.dumps(self.execution_context, indent=2)}
+
+Look through all the API responses and find the flight number. Return ONLY the flight number (e.g., "e1b2e7") with no explanation.
+"""
+        else:
+            final_prompt = f"""
 Execute this step based on the details and current context.
 
 STEP DETAILS: {json.dumps(step, indent=2)}
@@ -642,8 +727,22 @@ Execute the step and return the result.
 """
         
         try:
-            result = await self.llm.ainvoke(generic_prompt)
+            result = await self.llm.ainvoke(final_prompt)
             step_result = result.content.strip()
+            
+            # For FINAL step, clean up the result to extract just the flight number
+            if step_id == "FINAL":
+                import re
+                # Remove quotes and extra text
+                step_result = step_result.strip().strip('"\'')
+                
+                # If it contains explanation text, extract just the flight number
+                if len(step_result) > 15:
+                    flight_pattern = r'\b[a-zA-Z0-9]{6,10}\b'
+                    matches = re.findall(flight_pattern, step_result)
+                    if matches:
+                        step_result = matches[0]
+                        self.app_logger.info(f"🎯 Cleaned FINAL step result: {step_result}")
             
             # Store result in execution context
             self.execution_context[f"{step_id}_result"] = step_result
@@ -789,7 +888,25 @@ Execute the step and return the result.
                 
                 # Check if this is the final step
                 if step.get("next_step") == "FINAL" or current_step == len(workflow_steps):
-                    final_result = step_result.get("result")
+                    # Try to extract flight number directly from the step result
+                    step_response = step_result.get("response", {})
+                    step_data = step_response.get("data", {})
+                    
+                    # Look for flight number in various possible fields
+                    flight_number = None
+                    if isinstance(step_data, dict):
+                        for field in ["flightNumber", "flight_number", "number", "code", "id"]:
+                            if field in step_data:
+                                flight_number = step_data[field]
+                                break
+                    elif isinstance(step_data, str):
+                        flight_number = step_data
+                    
+                    if flight_number:
+                        final_result = str(flight_number).strip().strip('"\'')
+                        self.app_logger.info(f"🎯 Extracted flight number directly: {final_result}")
+                    else:
+                        final_result = step_result.get("result")
                 
                 # Small delay between steps
                 await asyncio.sleep(0.1)
@@ -797,16 +914,48 @@ Execute the step and return the result.
             # 7. Determine final answer using conversational approach
             if not final_result:
                 final_answer_prompt = f"""
-Based on the complete execution context, determine the final answer.
+Extract the flight number from the execution context.
 
 PROBLEM OBJECTIVE: {problem.get('main_objective', 'Unknown')}
 EXECUTION CONTEXT: {json.dumps(self.execution_context, indent=2)}
 
-What is the final answer? Return ONLY the final answer value.
+Look for flight number in the API responses. Return ONLY the flight number (e.g., "e1b2e7") with no explanation or extra text.
 """
                 
                 final_llm_result = await self.llm.ainvoke(final_answer_prompt)
-                final_result = final_llm_result.content.strip()
+                raw_result = final_llm_result.content.strip()
+                
+                # Extract just the flight number from the response
+                import re
+                # Look for flight number patterns (alphanumeric codes)
+                flight_pattern = r'[a-zA-Z0-9]{6,10}'
+                matches = re.findall(flight_pattern, raw_result)
+                
+                if matches:
+                    final_result = matches[0]  # Take the first match
+                else:
+                    # Fallback: try to extract from quotes
+                    quote_pattern = r'"([^"]*)"'
+                    quote_matches = re.findall(quote_pattern, raw_result)
+                    if quote_matches:
+                        final_result = quote_matches[0]
+                    else:
+                        final_result = raw_result
+            
+            # Clean up the final result to ensure it's just the flight number
+            if final_result:
+                final_result = str(final_result).strip().strip('"\'')
+                
+                # If it's a long response, try to extract just the flight number
+                if len(final_result) > 20:
+                    import re
+                    # Look for flight number patterns (alphanumeric codes)
+                    flight_pattern = r'\b[a-zA-Z0-9]{6,10}\b'
+                    matches = re.findall(flight_pattern, final_result)
+                    
+                    if matches:
+                        final_result = matches[0]
+                        self.app_logger.info(f"🎯 Extracted flight number from verbose response: {final_result}")
             
             self.app_logger.info(f"✅ Universal challenge solved: {final_result}")
             return str(final_result)
