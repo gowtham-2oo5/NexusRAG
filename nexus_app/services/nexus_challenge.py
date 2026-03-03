@@ -13,9 +13,9 @@ from urllib.parse import urlparse
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
-from hackrx_app.services.document_io import download_and_hash_document
+from nexus_app.services.document_io import download_and_hash_document
 from langchain_openai import ChatOpenAI
-from hackrx_app.utils.constants import GPT_PRIMARY
+from nexus_app.utils.constants import GPT_PRIMARY
 
 
 class UniversalLLMPipeline:
@@ -353,7 +353,7 @@ Return ONLY a JSON object with city-landmark mappings:
                             endpoint_suffix = "getFifthCityFlightNumber"
                             self.app_logger.info(f"🌐 Using hardcoded fallback: {endpoint_suffix}")
                 
-                url = f"https://register.hackrx.in/teams/public/flights/{endpoint_suffix}"
+                url = f"https://register.nexus.in/teams/public/flights/{endpoint_suffix}"
                 self.app_logger.info(f"🌐 Final URL: {url}")
                 
                 # Execute API call directly
@@ -377,7 +377,7 @@ Return ONLY a JSON object with city-landmark mappings:
         # For first API step (s1) or fallback
         if step_id == "s1":
             # This should be the myFavouriteCity endpoint
-            url = "https://register.hackrx.in/submissions/myFavouriteCity"
+            url = "https://register.nexus.in/submissions/myFavouriteCity"
             self.app_logger.info(f"🌐 First API call: {url}")
             
             response = await self._make_http_request("GET", url, None, None)
@@ -941,25 +941,34 @@ Look for flight number in the API responses. Return ONLY the flight number (e.g.
                         final_result = quote_matches[0]
                     else:
                         final_result = raw_result
-            
-            # Clean up the final result to ensure it's just the flight number
-            if final_result:
-                final_result = str(final_result).strip().strip('"\'')
-                
-                # If it's a long response, try to extract just the flight number
-                if len(final_result) > 20:
-                    import re
-                    # Look for flight number patterns (alphanumeric codes)
-                    flight_pattern = r'\b[a-zA-Z0-9]{6,10}\b'
-                    matches = re.findall(flight_pattern, final_result)
-                    
-                    if matches:
-                        final_result = matches[0]
-                        self.app_logger.info(f"🎯 Extracted flight number from verbose response: {final_result}")
-            
-            self.app_logger.info(f"✅ Universal challenge solved: {final_result}")
-            return str(final_result)
-            
+
+            self.app_logger.info(f"Received res: {final_result}")
+
+            if isinstance(final_result, dict):
+                flight_num = final_result.get("data", {}).get("flightNumber")
+            else:
+                # Try to parse from string
+                import json
+                try:
+                    final_result = json.loads(final_result)
+                    flight_num = final_result.get("data", {}).get("flightNumber")
+                except Exception:
+                    flight_num = None
+
+            if flight_num:
+                self.app_logger.info(f"🎯 Extracted flight number: {flight_num}")
+                return flight_num
+
+            # fallback regex if needed
+            import re
+            matches = re.findall(r'\b[a-zA-Z0-9]{6,10}\b', str(final_result))
+            if matches:
+                self.app_logger.info(f"🎯 Extracted flight number (regex): {matches[0]}")
+                return matches[0]
+
+            return "None"
+
+
         except Exception as e:
             self.app_logger.error(f"❌ Universal challenge solving failed: {e}")
             raise RuntimeError(f"Pipeline failed to solve challenge: {str(e)}")
@@ -974,7 +983,7 @@ class LLMDrivenChallengeAgent(UniversalLLMPipeline):
 
 
 # Main handler function
-async def handle_hackrx_challenge(doc_url: str, app_logger, executor) -> str:
+async def handle_nexus_challenge(doc_url: str, app_logger, executor) -> str:
     """
     Handle any challenge using the Universal LLM Pipeline.
     Works with ANY problem-solving PDF using conversational RAG + CAG approach.

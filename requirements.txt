@@ -27,9 +27,9 @@ fastapi==0.116.1
 fastapi-cli==0.0.8
 fastapi-cloud-cli==0.1.5
 filetype==1.2.0
-Flask==3.1.1
-flask-cors==6.0.1
-Flask-Login==0.6.3
+
+
+
 frozenlist==1.7.0
 gevent==25.5.1
 geventhttpclient==2.3.4

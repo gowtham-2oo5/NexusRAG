@@ -1,4 +1,4 @@
-from hackrx_app.app_factory import create_app
+from nexus_app.app_factory import create_app
 
 app = create_app()
 

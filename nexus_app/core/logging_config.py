@@ -2,14 +2,14 @@ import logging
 import os
 from logging.handlers import RotatingFileHandler
 
-from hackrx_app.utils.constants import LOG_DIR
+from nexus_app.utils.constants import LOG_DIR
 
 
 def configure_logging() -> logging.Logger:
     os.makedirs(LOG_DIR, exist_ok=True)
-    log_file_path = os.path.join(LOG_DIR, "hackrx_api.log")
+    log_file_path = os.path.join(LOG_DIR, "nexus_api.log")
 
-    logger = logging.getLogger("hackrx")
+    logger = logging.getLogger("nexus")
     logger.setLevel(logging.INFO)
     logger.propagate = False
 

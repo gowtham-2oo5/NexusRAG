@@ -2,7 +2,7 @@ from typing import Optional
 import os
 import aiofiles
 
-from hackrx_app.utils.constants import FAISS_BASE_DIR
+from nexus_app.utils.constants import FAISS_BASE_DIR
 
 
 def get_faiss_folder(doc_hash: str) -> str:

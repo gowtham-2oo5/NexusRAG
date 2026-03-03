@@ -21,6 +21,7 @@ Based on this content, identify the PRIMARY domain this document belongs to. Cho
 - Food/Nutrition
 - Travel/Tourism
 - Manufacturing/Industrial
+- News
 - Other (specify)
 
 Respond with ONLY the domain name (e.g., "Automobile", "Insurance", "Healthcare", etc.). Be specific - if it's about motorcycles, say "Motorcycle" not just "Automobile".
@@ -295,25 +296,32 @@ factual_content_template = PromptTemplate(
     input_variables=["context", "question", "domain"],
     template=(
         """
-You are analyzing factual {domain} content. Follow these steps exactly in order.
+You are a factual answering assistant for {domain} content. Follow these steps in strict order.
+
 STEP 1 — LANGUAGE DETECTION & MATCH CHECK:
 - Detect the primary language of the Document Content.
 - Detect the primary language of the Question.
-- If the detected languages are the same, proceed to STEP 2.
-- If one of them is detected as "Mixed" or "Unknown" but contains significant words in the other's language, treat them as the same and proceed to STEP 2.
-- Only if the detected languages are clearly different and share no substantial overlap, output exactly:
+- If they are the same, proceed to STEP 2.
+- If one is "Mixed" or "Unknown", OR the document contains relevant parts in the question’s language, OR the question contains keywords/names/numbers that appear in the document, treat them as compatible and proceed to STEP 2.
+- Only if the languages are clearly unrelated with **no** overlapping names, dates, numbers, or keywords, output exactly:
 "This question cannot be answered because the question language does not match the document language"
+and stop.
 
-STEP 2 — FACTUAL ANSWERING RULES:
-- Answer ONLY with facts explicitly stated in the document.
-- Use exact names, dates, numbers, and phrases from the document whenever possible.
-- Quote the document verbatim when possible.
-- If text is partially corrupted (e.g., OCR errors), repair it to the closest accurate form without changing the meaning.
-- Do NOT add background knowledge or assumptions.
-- Do NOT infer impacts, reasons, or explanations beyond the text.
-- Before responding with "This information is not provided in the document", search the entire document for any partial or full match to the question topic. Only use this phrase if no relevant information exists at all.
-- If the document lists multiple items or conditions relevant to the question, include them all.
-- Be concise, but do not omit any factual detail present in the document.
+STEP 2 — FACTUAL ANSWERING RULES (STRICT ENFORCEMENT):
+1. **Scan the entire document in all languages** for any full or partial information related to the question.
+2. If even **one sentence** or fragment contains relevant info, use it — do NOT say "This information is not provided in the document".
+3. If the information is partial, return the partial fact and add a note like:
+   "No further details are provided in the document."
+4. **Exact Wording Rule** — When stating numbers, names, dates, or key phrases, use them exactly as they appear in the document.  
+   - If OCR errors exist, correct them to the closest accurate form **without changing meaning**.
+5. **No Meaning Drift Rule** — Do NOT rephrase objectives, impacts, or intentions into something different. If unsure, quote the relevant sentence directly.
+6. Do NOT add background knowledge or external facts. Do NOT infer reasons or impacts beyond what is written.
+7. If the document lists multiple relevant items, include them all.
+
+STEP 3 — ANSWER FORMAT:
+- Output a single, concise factual answer in plain text.
+- Include direct quotes from the document when possible.
+- If multiple facts are present, separate them clearly.
 
 Document Content:
 {context}
@@ -324,6 +332,8 @@ Final Answer:
 """
     ),
 )
+
+
 
 
 # Agent-Based Challenge Analysis Template
@@ -358,7 +368,7 @@ OUTPUT FORMAT (STRICT JSON):
             "action": "API_CALL",
             "description": "Fetch favourite city from API",
             "method": "GET",
-            "url": "https://register.hackrx.in/submissions/myFavouriteCity",
+            "url": "https://register.nexus.in/submissions/myFavouriteCity",
             "expected_output": "city_name"
         }},
         {{
@@ -373,7 +383,7 @@ OUTPUT FORMAT (STRICT JSON):
             "action": "API_CALL",
             "description": "Get flight number using landmark endpoint",
             "method": "GET",
-            "url": "https://register.hackrx.in/teams/public/flights/[endpoint]",
+            "url": "https://register.nexus.in/teams/public/flights/[endpoint]",
             "expected_output": "flight_number"
         }}
     ],
@@ -419,6 +429,46 @@ OUTPUT FORMAT (STRICT JSON):
 }}
 
 CRITICAL: Return ONLY valid JSON. Be intelligent about using context and previous results.
+"""
+    ),
+)
+
+# Enhanced ultra-strict template with better language compatibility
+enhanced_ultra_strict_template = PromptTemplate(
+    input_variables=["context", "question", "domain"],
+    template=(
+        """
+You are a STRICT factual answering assistant. Follow these rules EXACTLY.
+
+LANGUAGE COMPATIBILITY RULES:
+1. If document and question are in the same language → Proceed
+2. If document contains names, numbers, dates that match the question → Proceed  
+3. If question is in English but asks about entities mentioned in the document → Proceed
+4. If question contains transliterated names that appear in document → Proceed
+5. Only reject if completely unrelated languages with zero shared elements
+
+STRICT FACTUAL EXTRACTION RULES:
+1. Extract information EXACTLY as written in the document
+2. Use direct quotes with quotation marks when possible
+3. Do NOT add external knowledge or assumptions
+4. Do NOT rephrase or interpret beyond what's written
+5. If information is partial, state what's available + "No further details provided"
+6. Do NOT hallucinate or invent any information
+7. For English questions about non-English content, provide factual translation of the relevant parts
+
+ANSWER REQUIREMENTS:
+- Use ONLY information from the document
+- Quote exact text when available
+- If answering English question about non-English content, translate the relevant facts accurately
+- If multiple facts exist, list them clearly
+- Keep answers concise and factual
+
+Document Content:
+{context}
+
+Question: {question}
+
+Extract and provide ONLY the factual information from the document above:
 """
     ),
 )

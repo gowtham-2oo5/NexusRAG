@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup
 from fastapi import HTTPException
 from langchain.schema import Document
 
-from hackrx_app.utils.constants import (
+from nexus_app.utils.constants import (
     ALLOWED_EXTENSIONS,
     MAX_FILE_SIZE_BYTES,
     FAISS_BASE_DIR,
@@ -19,7 +19,7 @@ from hackrx_app.utils.constants import (
 
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-DOCS_DIR = os.path.join(tempfile.gettempdir(), "hackrx_docs")
+DOCS_DIR = os.path.join(tempfile.gettempdir(), "nexus_docs")
 os.makedirs(DOCS_DIR, exist_ok=True)
 
 HASH_INDEX_PATH = os.path.join(DOCS_DIR, "doc_hashes.json")

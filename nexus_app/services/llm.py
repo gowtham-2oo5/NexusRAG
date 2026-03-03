@@ -5,15 +5,16 @@ from langchain_openai import ChatOpenAI
 from langchain.schema import Document
 from openai import RateLimitError
 
-from hackrx_app.prompts import (
+from nexus_app.prompts import (
     domain_detection_template,
     enhanced_prompt_template,
     fact_checking_template,
     factual_content_template,
+
     challenge_analysis_template,
     api_execution_template
 )
-from hackrx_app.utils.constants import GPT_FALLBACK, GPT_PRIMARY
+from nexus_app.utils.constants import GPT_FALLBACK, GPT_PRIMARY
 
 
 async def detect_document_domain(docs: List[Document]) -> str:
@@ -85,7 +86,13 @@ def compress_context_with_bm25(query: str, context_docs: List[Document], max_sen
 
 
 async def ask_with_context(question: str, context_docs: List[Document], domain: str, app_logger) -> str:
-    context = compress_context_with_bm25(question, context_docs)
+    # For factual content domains, use full context to avoid text corruption
+    if domain.lower() in ['technology/software', 'news', 'media']:
+        # Use full context without BM25 compression to preserve multi-language text integrity
+        context = "\n\n".join([doc.page_content for doc in context_docs if doc and doc.page_content])[:8000]
+        app_logger.info(f"🌐 Using full context for factual domain: {domain}")
+    else:
+        context = compress_context_with_bm25(question, context_docs)
 
     def extract_hex_token(text: str) -> Optional[str]:
         matches = re.findall(r"\b[a-fA-F0-9]{32,}\b", text)
@@ -98,7 +105,7 @@ async def ask_with_context(question: str, context_docs: List[Document], domain: 
 
     if token:
         if ("secret token" in q_lower) or ("get the token" in q_lower) or ("provide the token" in q_lower):
-            return "Fetched Secret Token: " + token
+            return token
         count_match = re.search(r"how many\s+([a-zA-Z0-9])'?s?\s+are\s+there\s+in\s+the\s+token", q_lower)
         if count_match:
             ch = count_match.group(1)
@@ -114,14 +121,14 @@ async def ask_with_context(question: str, context_docs: List[Document], domain: 
         prompt = enhanced_prompt_template.format(context=context, question=question, domain=domain)
 
     try:
-        llm = ChatOpenAI(model_name=GPT_PRIMARY, temperature=0.3)
+        llm = ChatOpenAI(model_name=GPT_PRIMARY, temperature=0.0)
         result = await llm.ainvoke(prompt)
         return result.content.strip()
     except RateLimitError:
         app_logger.warning(
             "⚠️ GPT-4o rate limited. Falling back to 4o-mini (you have 500 RPM for mini)"
         )
-        fallback_llm = ChatOpenAI(model_name=GPT_FALLBACK, temperature=0.3)
+        fallback_llm = ChatOpenAI(model_name=GPT_FALLBACK, temperature=0.0)
         result = await fallback_llm.ainvoke(prompt)
         return result.content.strip()
     except Exception as e:

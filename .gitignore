@@ -181,10 +181,19 @@ cython_debug/
 .cursorindexingignore
 faiss_indexes
 faiss_indexes.zip
-logs
-logs-v2
-script.sh
-
-
+logs-v2/
 logs-r4-v1/
+logs/
+*.log
+
+# Ignore data parsing scripts
+refactor.py
+extract_logs.py
+Q_and_A_logs.md
 .vscode/
+
+.idea/
+.pipeline_cache/
+
+faiss_indexes.zip
+FinalRound4SubmissionPDf.pdf

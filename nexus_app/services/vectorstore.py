@@ -7,8 +7,8 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 
-from hackrx_app.services.cache import get_faiss_folder
-from hackrx_app.utils.constants import CHUNK_OVERLAP, CHUNK_SIZE, EMBED_MODEL, EMBEDDING_CONCURRENT, EMBEDDING_BATCH_SIZE
+from nexus_app.services.cache import get_faiss_folder
+from nexus_app.utils.constants import CHUNK_OVERLAP, CHUNK_SIZE, EMBED_MODEL, EMBEDDING_CONCURRENT, EMBEDDING_BATCH_SIZE
 
 
 def split_document_sync(docs):

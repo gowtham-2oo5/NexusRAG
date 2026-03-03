@@ -1,16 +1,16 @@
 from fastapi import FastAPI
 
-from hackrx_app.core.logging_config import configure_logging
-from hackrx_app.core.middleware import create_request_logger_middleware
-from hackrx_app.routes.api import create_router
-from hackrx_app.services.processing import init_executor
-from hackrx_app.utils.constants import MAX_WORKERS
+from nexus_app.core.logging_config import configure_logging
+from nexus_app.core.middleware import create_request_logger_middleware
+from nexus_app.routes.api import create_router
+from nexus_app.services.processing import init_executor
+from nexus_app.utils.constants import MAX_WORKERS
 import google.generativeai as genai
-from hackrx_app.core.settings import get_settings
+from nexus_app.core.settings import get_settings
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="HackRX Document Q&A API", version="3.0")
+    app = FastAPI(title="PlaylearnAI - RAG demo", version="3.0")
 
     logger = configure_logging()
     settings = get_settings()

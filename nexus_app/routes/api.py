@@ -8,9 +8,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from langchain.retrievers.ensemble import EnsembleRetriever
 from langchain.schema import Document
 
-from hackrx_app.core.settings import Settings, get_settings
-from hackrx_app.models.schemas import QARequest
-from hackrx_app.services.cache import (
+from nexus_app.core.settings import Settings, get_settings
+from nexus_app.models.schemas import QARequest
+from nexus_app.services.cache import (
     faiss_index_exists,
     get_faiss_folder,
     load_domain_from_cache,
@@ -18,23 +18,23 @@ from hackrx_app.services.cache import (
     save_domain_to_cache,
     save_extracted_text_to_cache,
 )
-from hackrx_app.services.document_io import download_and_hash_document
-from hackrx_app.services.llm import ask_with_context, detect_document_domain, is_general_knowledge_question
-from hackrx_app.services.processing import init_executor, load_document
-from hackrx_app.services.retrieval import create_bm25_retriever, parallel_retrieval
-from hackrx_app.services.vectorstore import (
+from nexus_app.services.document_io import download_and_hash_document
+from nexus_app.services.llm import ask_with_context, detect_document_domain, is_general_knowledge_question
+from nexus_app.services.processing import init_executor, load_document
+from nexus_app.services.retrieval import create_bm25_retriever, parallel_retrieval
+from nexus_app.services.vectorstore import (
     build_faiss_index,
     load_faiss_index,
     split_document,
 )
-from hackrx_app.utils.constants import GPT_4O_MINI_CONCURRENT
-from hackrx_app.services.hackrx_challenge import handle_hackrx_challenge
+from nexus_app.utils.constants import GPT_4O_MINI_CONCURRENT
+from nexus_app.services.nexus_challenge import handle_nexus_challenge
 
 
 def create_router(app_logger, executor: ThreadPoolExecutor) -> APIRouter:
     router = APIRouter()
 
-    @router.post("/hackrx/run")
+    @router.post("/nexus/run")
     async def run_rag(
         req: Request,
         authorization: Optional[str] = Header(None),
@@ -59,13 +59,13 @@ def create_router(app_logger, executor: ThreadPoolExecutor) -> APIRouter:
             f"🎯 Starting RAG pipeline for {len(body.questions)} questions"
         )
 
-        # Trigger Condition: special HackRx challenge
+        # Trigger Condition: special Nexus challenge
         if "FinalRound4SubmissionPDF.pdf" in body.documents:
             try:
-                flight_number = await handle_hackrx_challenge(body.documents, app_logger, executor)
+                flight_number = await handle_nexus_challenge(body.documents, app_logger, executor)
                 return {"answers": [flight_number]}
             except Exception as e:
-                app_logger.error(f"HackRx challenge flow failed: {e}")
+                app_logger.error(f"Nexus challenge flow failed: {e}")
                 raise HTTPException(status_code=500, detail=f"Challenge flow failed: {str(e)}")
 
         from urllib.parse import urlparse
@@ -314,7 +314,7 @@ def create_router(app_logger, executor: ThreadPoolExecutor) -> APIRouter:
     @router.get("/")
     async def root():
         return {
-            "message": "HackRX Document Q&A API with comprehensive file support",
+            "message": "Nexus Document Q&A API with comprehensive file support",
             "version": "3.0",
             "supported_formats": [
                 "PDF",
